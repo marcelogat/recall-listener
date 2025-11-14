@@ -1,3 +1,24 @@
+const WebSocket = require('ws');
+const express = require('express');
+const app = express();
+
+const PORT = process.env.PORT || 10000;
+
+const server = app.listen(PORT, () => {
+    console.log('--- Servidor "Oído" iniciado ---');
+    console.log(`--- Escuchando en el puerto ${PORT} ---`);
+});
+
+const wss = new WebSocket.Server({ server });
+
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        message: 'Servidor WebSocket funcionando',
+        connections: wss.clients.size 
+    });
+});
+
 // Buffer para acumular frases
 let conversationBuffer = [];
 let timeoutId = null;
@@ -82,3 +103,5 @@ wss.on('connection', function connection(ws) {
         console.error('❌ ERROR de WebSocket:', error);
     });
 });
+
+console.log('✅ Servidor WebSocket listo para recibir conexiones de Recall.ai');
