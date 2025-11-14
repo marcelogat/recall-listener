@@ -25,12 +25,13 @@ wss.on('connection', function connection(ws, req) {
     try {
       const fullText = currentUtterance.map(word => word.text).join(' ');
       const speaker = currentUtterance[0].speaker;
+      const speakerName = currentUtterance[0].speakerName;
       const startTime = currentUtterance[0].start_time;
       const endTime = currentUtterance[currentUtterance.length - 1].end_time;
 
       console.log('\n' + '='.repeat(80));
       console.log(`💾 GUARDANDO EN SUPABASE:`);
-      console.log(`   Speaker: ${speaker}`);
+      console.log(`   Speaker: ${speakerName} (${speaker})`);
       console.log(`   Texto: ${fullText}`);
       console.log(`   Duración: ${startTime}s - ${endTime}s`);
       console.log('='.repeat(80));
@@ -39,7 +40,7 @@ wss.on('connection', function connection(ws, req) {
         .from('transcripts')
         .insert([
           {
-            speaker: speaker,
+            speaker: speakerName,
             text: fullText,
             start_time: startTime,
             end_time: endTime,
@@ -52,7 +53,7 @@ wss.on('connection', function connection(ws, req) {
       if (error) {
         console.error('❌ Error al guardar en Supabase:', error);
       } else {
-        console.log('✅ Guardado exitosamente');
+        console.log('✅ Guardado exitosamente en Supabase');
       }
 
       currentUtterance = [];
@@ -72,29 +73,28 @@ wss.on('connection', function connection(ws, req) {
         return;
       }
 
-      // 🔍 DEBUG: MOSTRAR TODO EL MENSAJE
-      console.log('\n' + '🔍'.repeat(40));
-      console.log('📨 MENSAJE COMPLETO RECIBIDO:');
-      console.log(JSON.stringify(data, null, 2));
-      console.log('🔍'.repeat(40) + '\n');
+      const eventType = data.event;
 
-      // Verificar diferentes estructuras posibles
-      const messageType = data.type || data.event || data.message_type || 'desconocido';
-      console.log(`📝 Tipo detectado: ${messageType}`);
+      // Solo procesar mensajes de transcript
+      if (eventType === 'transcript.data' || eventType === 'transcript.partial_data') {
+        
+        // ✅ LA ESTRUCTURA CORRECTA ES: data.data.words
+        const words = data.data?.data?.words || [];
+        const participant = data.data?.data?.participant;
+        
+        if (!words || words.length === 0) {
+          return;
+        }
 
-      // Intentar encontrar las palabras en diferentes ubicaciones
-      const words = data.words || data.transcript?.words || data.data?.words || [];
-      const speaker = data.speaker || data.transcript?.speaker || data.data?.speaker || 'unknown';
+        const speakerId = participant?.id || 'unknown';
+        const speakerName = participant?.name || `Speaker ${speakerId}`;
 
-      if (words && words.length > 0) {
-        console.log(`\n✅ PALABRAS ENCONTRADAS!`);
-        console.log(`   Speaker: ${speaker}`);
-        console.log(`   Cantidad: ${words.length}`);
-        console.log(`   Palabras:`, words.map(w => w.text || w.word || '').join(' '));
+        console.log(`\n📝 [${speakerName}] Recibidas ${words.length} palabras`);
+        console.log(`   Texto: ${words.map(w => w.text).join(' ')}`);
 
-        // Si cambió el speaker, procesar
-        if (lastSpeaker !== null && lastSpeaker !== speaker) {
-          console.log(`🔄 Cambio de speaker: ${lastSpeaker} → ${speaker}`);
+        // Si cambió el speaker, procesar lo anterior
+        if (lastSpeaker !== null && lastSpeaker !== speakerId) {
+          console.log(`🔄 Cambio de speaker detectado`);
           if (timeoutId) {
             clearTimeout(timeoutId);
             timeoutId = null;
@@ -102,32 +102,35 @@ wss.on('connection', function connection(ws, req) {
           await processCompleteUtterance();
         }
 
-        // Agregar palabras
-        words.forEach(word => {
-          const text = word.text || word.word || '';
-          if (text.trim()) {
-            currentUtterance.push({
-              text: text,
-              speaker: speaker,
-              start_time: word.start_time || word.start || 0,
-              end_time: word.end_time || word.end || 0
-            });
+        // Agregar palabras - SOLO si es transcript.data (completo)
+        if (eventType === 'transcript.data') {
+          words.forEach(word => {
+            const text = word.text || '';
+            if (text.trim()) {
+              currentUtterance.push({
+                text: text,
+                speaker: speakerId,
+                speakerName: speakerName,
+                start_time: word.start_timestamp?.relative || 0,
+                end_time: word.end_timestamp?.relative || 0
+              });
+            }
+          });
+
+          lastSpeaker = speakerId;
+
+          if (timeoutId) {
+            clearTimeout(timeoutId);
           }
-        });
 
-        lastSpeaker = speaker;
+          timeoutId = setTimeout(() => {
+            processCompleteUtterance();
+          }, SILENCE_TIMEOUT);
 
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+        } else {
+          console.log(`   ⏭️  Ignorando partial_data (esperando transcript.data completo)`);
         }
-
-        timeoutId = setTimeout(() => {
-          processCompleteUtterance();
-        }, SILENCE_TIMEOUT);
-
-        console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
-      } else {
-        console.log(`⚠️  No se encontraron palabras en este mensaje`);
       }
       
     } catch (e) {
@@ -156,13 +159,8 @@ wss.on('connection', function connection(ws, req) {
   const pingInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.ping();
-      console.log('🏓 Ping enviado');
     }
   }, 30000);
-
-  ws.on('pong', () => {
-    console.log('🏓 Pong recibido');
-  });
 
   ws.on('close', () => {
     clearInterval(pingInterval);
