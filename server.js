@@ -25,19 +25,14 @@ wss.on('connection', function connection(ws) {
     ws.on('message', function incoming(message) {
         try {
             const messageString = message.toString();
-            console.log('📩 Mensaje recibido:', messageString);
             
             try {
                 const data = JSON.parse(messageString);
-                console.log('📝 Evento:', data.event);
                 
                 if (data.event === 'transcript.data') {
                     const words = data.data.data.words.map(w => w.text).join(' ');
                     const participant = data.data.data.participant.name;
-                    console.log('🗣️ TRANSCRIPCIÓN FINAL:');
-                    console.log(`   Participante: ${participant}`);
-                    console.log(`   Texto: "${words}"`);
-                    console.log('---');
+                    console.log(`✅ ${participant}: "${words}"`);
                 }
                 
                 if (data.event === 'transcript.partial_data') {
