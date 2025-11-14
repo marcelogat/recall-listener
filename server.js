@@ -34,12 +34,6 @@ wss.on('connection', function connection(ws) {
                     const participant = data.data.data.participant.name;
                     console.log(`✅ ${participant}: "${words}"`);
                 }
-                
-                if (data.event === 'transcript.partial_data') {
-                    const words = data.data.data.words.map(w => w.text).join(' ');
-                    const participant = data.data.data.participant.name;
-                    console.log(`⏳ ${participant}: "${words}"`);
-                }
             } catch (e) {
                 // Si no es JSON solo mostramos el mensaje
             }
