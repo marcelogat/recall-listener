@@ -1,40 +1,47 @@
 const WebSocket = require('ws');
+const express = require('express');
+const app = express();
 
-// Render nos da el puerto automáticamente en esta variable de entorno
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 10000;
 
-// 1. Crear el servidor de WebSocket
-const wss = new WebSocket.Server({ port: PORT });
+// IMPORTANTE: Crear servidor HTTP primero
+const server = app.listen(PORT, () => {
+    console.log('--- Servidor "Oído" iniciado ---');
+    console.log(`--- Escuchando en el puerto ${PORT} ---`);
+});
 
-console.log(`--- Servidor "Oído" iniciado ---`);
-console.log(`--- Escuchando en el puerto ${PORT} ---`);
+// Montar WebSocket sobre el servidor HTTP
+const wss = new WebSocket.Server({ server });
 
-// 2. Esto se ejecuta CADA VEZ que un cliente (Recall.ai) se conecta
+// Health check para que Render sepa que está vivo
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        message: 'Servidor WebSocket funcionando',
+        connections: wss.clients.size 
+    });
+});
+
 wss.on('connection', function connection(ws) {
-
     console.log('>>> ¡CLIENTE CONECTADO! (Probablemente el bot de Recall.ai)');
-
-    // 3. Esto se ejecuta CADA VEZ que ese cliente nos envía un mensaje
+    
     ws.on('message', function incoming(message) {
         try {
             const messageString = message.toString();
-
-        
-            // Por ahora, solo lo mostraremos en el log (registro)
-            // En la Parte B, aquí lo guardaremos en la base de datos.
-            console.log('Mensaje recibido:', messageString);
-            // -----------------------------
-
-        } catch (error) {
-            console.error('ERROR al procesar el mensaje:', error);
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('<<< Cliente desconectado.');
-    });
-
-    ws.on('error', (error) => {
-        console.error('ERROR de WebSocket:', error);
-    });
-});
+            console.log('📩 Mensaje recibido:', messageString);
+            
+            // Intentar parsear como JSON
+            try {
+                const data = JSON.parse(messageString);
+                console.log('📝 Evento:', data.event);
+                
+                if (data.event === 'transcript.data') {
+                    console.log('🗣️ Transcripción final:', data.data);
+                }
+                
+                if (data.event === 'transcript.partial_data') {
+                    console.log('⏳ Transcripción parcial:', data.data);
+                }
+            } catch (e) {
+                // Si no es JSON, solo mostramos el mensaje
+            }
