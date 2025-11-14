@@ -144,10 +144,10 @@ wss.on('connection', function connection(ws, req) { // 'req' nos da la petición
                     }
                     
                     // Iniciar nuevo timeout (llama al processCompleteUtterance de esta conexión)
+                    // ESTA ES LA LÍNEA CORREGIDA:
                     timeoutId = setTimeout(() => {
-                        processCompleteUtterance(),
-                        SILENCE_TIMEOUT
-                    });
+                        processCompleteUtterance();
+                    }, SILENCE_TIMEOUT);
                 }
             } catch (e) {
                 // Si no es JSON, solo mostramos el mensaje
