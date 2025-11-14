@@ -4,16 +4,13 @@ const app = express();
 
 const PORT = process.env.PORT || 10000;
 
-// IMPORTANTE: Crear servidor HTTP primero
 const server = app.listen(PORT, () => {
     console.log('--- Servidor "Oído" iniciado ---');
     console.log(`--- Escuchando en el puerto ${PORT} ---`);
 });
 
-// Montar WebSocket sobre el servidor HTTP
 const wss = new WebSocket.Server({ server });
 
-// Health check para que Render sepa que está vivo
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
@@ -30,7 +27,6 @@ wss.on('connection', function connection(ws) {
             const messageString = message.toString();
             console.log('📩 Mensaje recibido:', messageString);
             
-            // Intentar parsear como JSON
             try {
                 const data = JSON.parse(messageString);
                 console.log('📝 Evento:', data.event);
@@ -43,5 +39,21 @@ wss.on('connection', function connection(ws) {
                     console.log('⏳ Transcripción parcial:', data.data);
                 }
             } catch (e) {
-                // Si no es JSON, solo mostramos el mensaje
+                // Si no es JSON solo mostramos el mensaje
             }
+            
+        } catch (error) {
+            console.error('❌ ERROR al procesar el mensaje:', error);
+        }
+    });
+    
+    ws.on('close', () => {
+        console.log('<<< Cliente desconectado.');
+    });
+    
+    ws.on('error', (error) => {
+        console.error('❌ ERROR de WebSocket:', error);
+    });
+});
+
+console.log('✅ Servidor WebSocket listo para recibir conexiones de Recall.ai');
