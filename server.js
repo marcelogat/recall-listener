@@ -32,14 +32,21 @@ wss.on('connection', function connection(ws) {
                 console.log('📝 Evento:', data.event);
                 
                 if (data.event === 'transcript.data') {
-                    console.log('🗣️ Transcripción final:', data.data);
+                    const words = data.data.data.words.map(w => w.text).join(' ');
+                    const participant = data.data.data.participant.name;
+                    console.log('🗣️ TRANSCRIPCIÓN FINAL:');
+                    console.log(`   Participante: ${participant}`);
+                    console.log(`   Texto: "${words}"`);
+                    console.log('---');
                 }
                 
                 if (data.event === 'transcript.partial_data') {
-                    console.log('⏳ Transcripción parcial:', data.data);
+                    const words = data.data.data.words.map(w => w.text).join(' ');
+                    const participant = data.data.data.participant.name;
+                    console.log(`⏳ ${participant}: "${words}"`);
                 }
             } catch (e) {
-                // Si no es JSON, solo mostramos el mensaje
+                // Si no es JSON solo mostramos el mensaje
             }
             
         } catch (error) {
