@@ -3,7 +3,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 // Configuración de Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY; // ← Usa ANON_KEY, no SERVICE_KEY
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const wss = new WebSocket.Server({ port: 8080 });
@@ -11,23 +11,22 @@ const wss = new WebSocket.Server({ port: 8080 });
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 // Constantes
-const SILENCE_TIMEOUT = 3000; // 3 segundos de silencio antes de procesar
+const SILENCE_TIMEOUT = 3000; // 3 segundos de silencio
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
-  // Variables de estado para ESTA conexión específica
+  // Variables de estado para ESTA conexión
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
 
-  // ✅ FUNCIÓN CORREGIDA: Ahora tiene acceso a las variables de la conexión
+  // ✅ FUNCIÓN DENTRO DEL SCOPE CORRECTO
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0) return;
 
     try {
-      // Construir el texto completo
       const fullText = currentUtterance.map(word => word.text).join(' ');
       const speaker = currentUtterance[0].speaker;
       const startTime = currentUtterance[0].start_time;
@@ -61,7 +60,6 @@ wss.on('connection', function connection(ws, req) {
         console.log('✅ Guardado exitosamente:', data);
       }
 
-      // Limpiar el utterance actual
       currentUtterance = [];
       
     } catch (error) {
@@ -73,13 +71,11 @@ wss.on('connection', function connection(ws, req) {
     try {
       const data = JSON.parse(message);
       
-      // Ignorar mensajes de configuración del bot
       if (data.type === 'bot_config' || data.type === 'config') {
         console.log('⚙️  Configuración del bot recibida');
         return;
       }
 
-      // Procesar palabras de transcripción
       if (data.type === 'transcript' && data.words && Array.isArray(data.words)) {
         const currentSpeaker = data.speaker || data.words[0]?.speaker || 'unknown';
 
@@ -87,19 +83,17 @@ wss.on('connection', function connection(ws, req) {
 
         // Si cambió el speaker, procesar lo anterior
         if (lastSpeaker !== null && lastSpeaker !== currentSpeaker) {
-          console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${currentSpeaker}`);
+          console.log(`🔄 Cambio de speaker: ${lastSpeaker} → ${currentSpeaker}`);
           
-          // Cancelar timeout anterior
           if (timeoutId) {
             clearTimeout(timeoutId);
             timeoutId = null;
           }
           
-          // Procesar inmediatamente
           await processCompleteUtterance();
         }
 
-        // Agregar las nuevas palabras
+        // Agregar nuevas palabras
         data.words.forEach(word => {
           currentUtterance.push({
             text: word.text || word.word || '',
@@ -111,25 +105,21 @@ wss.on('connection', function connection(ws, req) {
 
         lastSpeaker = currentSpeaker;
 
-        // Cancelar timeout anterior si existe
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
 
-        // ✅ ESTA ES LA LÍNEA CORREGIDA:
-        // Iniciar nuevo timeout para procesar cuando haya silencio
+        // ✅ TIMEOUT CORREGIDO
         timeoutId = setTimeout(() => {
           processCompleteUtterance();
         }, SILENCE_TIMEOUT);
 
-        // Mostrar progreso
         const previewText = currentUtterance.slice(-10).map(w => w.text).join(' ');
         console.log(`   Preview: ...${previewText}`);
-        console.log(`   Total palabras acumuladas: ${currentUtterance.length}`);
+        console.log(`   Total palabras: ${currentUtterance.length}`);
       }
       
     } catch (e) {
-      // Si no es JSON, solo mostramos el mensaje
       if (message.toString().includes('error')) {
         console.error('❌ Error recibido:', message.toString());
       }
@@ -139,13 +129,11 @@ wss.on('connection', function connection(ws, req) {
   ws.on('close', async function close() {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
     
-    // Procesar cualquier utterance pendiente antes de cerrar
     if (currentUtterance.length > 0) {
-      console.log('💾 Procesando transcript pendiente antes de cerrar...');
+      console.log('💾 Procesando transcript pendiente...');
       await processCompleteUtterance();
     }
     
-    // Limpiar timeout
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
@@ -156,7 +144,6 @@ wss.on('connection', function connection(ws, req) {
   });
 });
 
-// Manejo de errores globales
 process.on('uncaughtException', (error) => {
   console.error('❌ Error no capturado:', error);
 });
