@@ -11,18 +11,17 @@ const wss = new WebSocket.Server({ port: 8080 });
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 // Constantes
-const SILENCE_TIMEOUT = 3000; // 3 segundos de silencio
+const SILENCE_TIMEOUT = 3000;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
-  // Variables de estado para ESTA conexión
+  // Variables de estado
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
 
-  // ✅ FUNCIÓN DENTRO DEL SCOPE CORRECTO
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0) return;
 
@@ -39,7 +38,6 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   Duración: ${startTime}s - ${endTime}s`);
       console.log('='.repeat(80));
 
-      // Insertar en Supabase
       const { data, error } = await supabase
         .from('transcripts')
         .insert([
@@ -69,15 +67,38 @@ wss.on('connection', function connection(ws, req) {
 
   ws.on('message', async function incoming(message) {
     try {
-      const data = JSON.parse(message);
-      
-      if (data.type === 'bot_config' || data.type === 'config') {
-        console.log('⚙️  Configuración del bot recibida');
+      // Intentar parsear como JSON
+      let data;
+      try {
+        data = JSON.parse(message);
+      } catch (parseError) {
+        // Si no es JSON válido, solo log y continuar
+        console.log('⚠️  Mensaje no-JSON recibido (ignorando)');
         return;
       }
 
-      if (data.type === 'transcript' && data.words && Array.isArray(data.words)) {
-        const currentSpeaker = data.speaker || data.words[0]?.speaker || 'unknown';
+      // Log para debug
+      console.log('📨 Tipo de mensaje:', data.type || 'desconocido');
+
+      // Ignorar mensajes de configuración
+      if (data.type === 'bot_ready' || 
+          data.type === 'bot_started' || 
+          data.type === 'transcript_end' ||
+          data.type === 'bot_status') {
+        console.log(`ℹ️  Mensaje de sistema: ${data.type}`);
+        return;
+      }
+
+      // Procesar solo mensajes de transcript
+      if (data.type === 'transcript') {
+        
+        // Validar que tenga words
+        if (!data.words || !Array.isArray(data.words) || data.words.length === 0) {
+          console.log('⚠️  Mensaje de transcript sin palabras (ignorando)');
+          return;
+        }
+
+        const currentSpeaker = data.speaker || 'unknown';
 
         console.log(`\n📝 [${currentSpeaker}] Recibidas ${data.words.length} palabras`);
 
@@ -95,12 +116,15 @@ wss.on('connection', function connection(ws, req) {
 
         // Agregar nuevas palabras
         data.words.forEach(word => {
-          currentUtterance.push({
-            text: word.text || word.word || '',
-            speaker: currentSpeaker,
-            start_time: word.start_time || word.start || 0,
-            end_time: word.end_time || word.end || 0
-          });
+          const text = word.text || word.word || '';
+          if (text.trim()) { // Solo agregar palabras no vacías
+            currentUtterance.push({
+              text: text,
+              speaker: currentSpeaker,
+              start_time: word.start_time || word.start || 0,
+              end_time: word.end_time || word.end || 0
+            });
+          }
         });
 
         lastSpeaker = currentSpeaker;
@@ -109,7 +133,6 @@ wss.on('connection', function connection(ws, req) {
           clearTimeout(timeoutId);
         }
 
-        // ✅ TIMEOUT CORREGIDO
         timeoutId = setTimeout(() => {
           processCompleteUtterance();
         }, SILENCE_TIMEOUT);
@@ -120,14 +143,15 @@ wss.on('connection', function connection(ws, req) {
       }
       
     } catch (e) {
-      if (message.toString().includes('error')) {
-        console.error('❌ Error recibido:', message.toString());
-      }
+      console.error('❌ Error procesando mensaje:', e.message);
+      // NO cerrar la conexión, solo continuar
     }
   });
 
-  ws.on('close', async function close() {
+  ws.on('close', async function close(code, reason) {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
+    console.log(`   Código: ${code}`);
+    console.log(`   Razón: ${reason || 'No especificada'}`);
     
     if (currentUtterance.length > 0) {
       console.log('💾 Procesando transcript pendiente...');
@@ -140,7 +164,24 @@ wss.on('connection', function connection(ws, req) {
   });
 
   ws.on('error', function error(err) {
-    console.error('❌ Error en WebSocket:', err);
+    console.error('❌ Error en WebSocket:', err.message);
+    // NO cerrar la conexión automáticamente
+  });
+
+  // Enviar un ping cada 30 segundos para mantener la conexión viva
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+      console.log('🏓 Ping enviado');
+    }
+  }, 30000);
+
+  ws.on('pong', () => {
+    console.log('🏓 Pong recibido');
+  });
+
+  ws.on('close', () => {
+    clearInterval(pingInterval);
   });
 });
 
