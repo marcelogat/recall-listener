@@ -1,7 +1,6 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 
-// Configuración de Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -10,14 +9,12 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-// Constantes
 const SILENCE_TIMEOUT = 3000;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
-  // Variables de estado
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
@@ -55,7 +52,7 @@ wss.on('connection', function connection(ws, req) {
       if (error) {
         console.error('❌ Error al guardar en Supabase:', error);
       } else {
-        console.log('✅ Guardado exitosamente:', data);
+        console.log('✅ Guardado exitosamente');
       }
 
       currentUtterance = [];
@@ -67,67 +64,58 @@ wss.on('connection', function connection(ws, req) {
 
   ws.on('message', async function incoming(message) {
     try {
-      // Intentar parsear como JSON
       let data;
       try {
         data = JSON.parse(message);
       } catch (parseError) {
-        // Si no es JSON válido, solo log y continuar
-        console.log('⚠️  Mensaje no-JSON recibido (ignorando)');
+        console.log('⚠️  Mensaje no-JSON recibido');
         return;
       }
 
-      // Log para debug
-      console.log('📨 Tipo de mensaje:', data.type || 'desconocido');
+      // 🔍 DEBUG: MOSTRAR TODO EL MENSAJE
+      console.log('\n' + '🔍'.repeat(40));
+      console.log('📨 MENSAJE COMPLETO RECIBIDO:');
+      console.log(JSON.stringify(data, null, 2));
+      console.log('🔍'.repeat(40) + '\n');
 
-      // Ignorar mensajes de configuración
-      if (data.type === 'bot_ready' || 
-          data.type === 'bot_started' || 
-          data.type === 'transcript_end' ||
-          data.type === 'bot_status') {
-        console.log(`ℹ️  Mensaje de sistema: ${data.type}`);
-        return;
-      }
+      // Verificar diferentes estructuras posibles
+      const messageType = data.type || data.event || data.message_type || 'desconocido';
+      console.log(`📝 Tipo detectado: ${messageType}`);
 
-      // Procesar solo mensajes de transcript
-      if (data.type === 'transcript') {
-        
-        // Validar que tenga words
-        if (!data.words || !Array.isArray(data.words) || data.words.length === 0) {
-          console.log('⚠️  Mensaje de transcript sin palabras (ignorando)');
-          return;
-        }
+      // Intentar encontrar las palabras en diferentes ubicaciones
+      const words = data.words || data.transcript?.words || data.data?.words || [];
+      const speaker = data.speaker || data.transcript?.speaker || data.data?.speaker || 'unknown';
 
-        const currentSpeaker = data.speaker || 'unknown';
+      if (words && words.length > 0) {
+        console.log(`\n✅ PALABRAS ENCONTRADAS!`);
+        console.log(`   Speaker: ${speaker}`);
+        console.log(`   Cantidad: ${words.length}`);
+        console.log(`   Palabras:`, words.map(w => w.text || w.word || '').join(' '));
 
-        console.log(`\n📝 [${currentSpeaker}] Recibidas ${data.words.length} palabras`);
-
-        // Si cambió el speaker, procesar lo anterior
-        if (lastSpeaker !== null && lastSpeaker !== currentSpeaker) {
-          console.log(`🔄 Cambio de speaker: ${lastSpeaker} → ${currentSpeaker}`);
-          
+        // Si cambió el speaker, procesar
+        if (lastSpeaker !== null && lastSpeaker !== speaker) {
+          console.log(`🔄 Cambio de speaker: ${lastSpeaker} → ${speaker}`);
           if (timeoutId) {
             clearTimeout(timeoutId);
             timeoutId = null;
           }
-          
           await processCompleteUtterance();
         }
 
-        // Agregar nuevas palabras
-        data.words.forEach(word => {
+        // Agregar palabras
+        words.forEach(word => {
           const text = word.text || word.word || '';
-          if (text.trim()) { // Solo agregar palabras no vacías
+          if (text.trim()) {
             currentUtterance.push({
               text: text,
-              speaker: currentSpeaker,
+              speaker: speaker,
               start_time: word.start_time || word.start || 0,
               end_time: word.end_time || word.end || 0
             });
           }
         });
 
-        lastSpeaker = currentSpeaker;
+        lastSpeaker = speaker;
 
         if (timeoutId) {
           clearTimeout(timeoutId);
@@ -137,21 +125,19 @@ wss.on('connection', function connection(ws, req) {
           processCompleteUtterance();
         }, SILENCE_TIMEOUT);
 
-        const previewText = currentUtterance.slice(-10).map(w => w.text).join(' ');
-        console.log(`   Preview: ...${previewText}`);
-        console.log(`   Total palabras: ${currentUtterance.length}`);
+        console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+      } else {
+        console.log(`⚠️  No se encontraron palabras en este mensaje`);
       }
       
     } catch (e) {
       console.error('❌ Error procesando mensaje:', e.message);
-      // NO cerrar la conexión, solo continuar
     }
   });
 
   ws.on('close', async function close(code, reason) {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
-    console.log(`   Código: ${code}`);
-    console.log(`   Razón: ${reason || 'No especificada'}`);
+    console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
     
     if (currentUtterance.length > 0) {
       console.log('💾 Procesando transcript pendiente...');
@@ -165,10 +151,8 @@ wss.on('connection', function connection(ws, req) {
 
   ws.on('error', function error(err) {
     console.error('❌ Error en WebSocket:', err.message);
-    // NO cerrar la conexión automáticamente
   });
 
-  // Enviar un ping cada 30 segundos para mantener la conexión viva
   const pingInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.ping();
