@@ -18,7 +18,8 @@ const SILENCE_TIMEOUT = 3000;
 // Perfil de Alex
 const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
 Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
-Tu rol es asistir en reuniones cuando te mencionen por nombre.`;
+Tu rol es asistir en reuniones cuando te mencionen por nombre.
+Responde de forma breve y concisa, como en una conversación normal.`;
 
 wss.on('connection', function connection(ws_client, req) {
   const clientIp = req.socket.remoteAddress;
@@ -29,6 +30,7 @@ wss.on('connection', function connection(ws_client, req) {
   let lastSpeaker = null;
   let openaiWs = null;
   let openaiReady = false;
+  let audioBuffer = [];
 
   // Función para inicializar conexión con OpenAI
   function initOpenAI() {
@@ -54,17 +56,18 @@ wss.on('connection', function connection(ws_client, req) {
           const sessionUpdate = {
             type: 'session.update',
             session: {
-              modalities: ['text'],
+              modalities: ['text', 'audio'],  // ✅ HABILITAMOS AUDIO
               instructions: ALEX_PROFILE,
               voice: 'alloy',
               input_audio_format: 'pcm16',
               output_audio_format: 'pcm16',
-              turn_detection: null
+              turn_detection: null,
+              temperature: 0.8
             }
           };
           
           openaiWs.send(JSON.stringify(sessionUpdate));
-          console.log('📋 Perfil de Alex enviado a OpenAI');
+          console.log('📋 Perfil de Alex enviado a OpenAI (con audio habilitado)');
           openaiReady = true;
         } catch (e) {
           console.error('❌ Error enviando configuración a OpenAI:', e.message);
@@ -75,11 +78,25 @@ wss.on('connection', function connection(ws_client, req) {
         try {
           const event = JSON.parse(message);
           
+          // Texto de respuesta
           if (event.type === 'response.text.delta') {
-            console.log(`🤖 ALEX: ${event.delta}`);
+            console.log(`🤖 ALEX (texto): ${event.delta}`);
           } else if (event.type === 'response.text.done') {
-            console.log(`\n✅ ALEX terminó: ${event.text}`);
-          } else if (event.type === 'response.done') {
+            console.log(`\n✅ ALEX terminó de escribir: ${event.text}`);
+          }
+          
+          // Audio de respuesta
+          else if (event.type === 'response.audio.delta') {
+            console.log(`🔊 Recibiendo chunk de audio de OpenAI`);
+            audioBuffer.push(event.delta); // Acumular chunks de audio
+          } else if (event.type === 'response.audio.done') {
+            console.log(`✅ Audio completo recibido de OpenAI`);
+            sendAudioToRecall(audioBuffer.join(''));
+            audioBuffer = [];
+          }
+          
+          // Otros eventos
+          else if (event.type === 'response.done') {
             console.log(`✅ Respuesta completa de OpenAI`);
           } else {
             console.log(`📨 OpenAI event: ${event.type}`);
@@ -100,6 +117,32 @@ wss.on('connection', function connection(ws_client, req) {
       });
     } catch (error) {
       console.error('❌ Error inicializando OpenAI:', error.message);
+    }
+  }
+
+  // Función para enviar audio a Recall.ai
+  function sendAudioToRecall(base64Audio) {
+    try {
+      console.log(`\n🔊 Enviando audio de Alex a Recall.ai...`);
+      
+      // Enviar el audio en formato que Recall.ai espera
+      const audioMessage = {
+        event: 'bot.audio_out',
+        data: {
+          audio: base64Audio,
+          format: 'pcm16',
+          sample_rate: 24000
+        }
+      };
+      
+      if (ws_client.readyState === 1) {
+        ws_client.send(JSON.stringify(audioMessage));
+        console.log(`✅ Audio enviado a Recall.ai`);
+      } else {
+        console.log(`⚠️  No se pudo enviar audio - WebSocket no conectado`);
+      }
+    } catch (e) {
+      console.error('❌ Error enviando audio a Recall:', e.message);
     }
   }
 
@@ -145,13 +188,19 @@ wss.on('connection', function connection(ws_client, req) {
             
             openaiWs.send(JSON.stringify(conversationItem));
             
+            // Solicitar respuesta CON AUDIO
             const responseCreate = {
-              type: 'response.create'
+              type: 'response.create',
+              response: {
+                modalities: ['text', 'audio'],  // ✅ PEDIMOS AUDIO
+                instructions: 'Responde de forma natural y conversacional en español.'
+              }
             };
             
             openaiWs.send(JSON.stringify(responseCreate));
             
             console.log(`📤 Texto enviado a OpenAI: "${fullText}"`);
+            console.log(`🎤 Esperando respuesta en audio...`);
           } catch (e) {
             console.error('❌ Error enviando a OpenAI:', e.message);
           }
