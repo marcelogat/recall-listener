@@ -29,11 +29,13 @@ wss.on('connection', function connection(ws, req) {
   let botId = null;
   let conversationHistory = [];
 
-  // Función para generar audio con ElevenLabs
+  // Función OPTIMIZADA para generar audio con ElevenLabs (Turbo v2.5)
   async function generateElevenLabsAudio(text) {
     try {
-      console.log('🎙️ Generando audio con ElevenLabs...');
+      console.log('🎙️ Generando audio con ElevenLabs Turbo...');
       console.log(`📝 Texto: "${text}"`);
+
+      const startTime = Date.now();
 
       const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
         method: 'POST',
@@ -44,13 +46,14 @@ wss.on('connection', function connection(ws, req) {
         },
         body: JSON.stringify({
           text: text,
-          model_id: 'eleven_multilingual_v2',
+          model_id: 'eleven_turbo_v2_5', // ✅ MODELO TURBO (mucho más rápido)
           voice_settings: {
             stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.5,
+            similarity_boost: 0.8,
+            style: 0.0,
             use_speaker_boost: true
-          }
+          },
+          optimize_streaming_latency: 4 // ✅ Máxima optimización de latencia
         })
       });
 
@@ -62,7 +65,9 @@ wss.on('connection', function connection(ws, req) {
       const audioBuffer = await response.arrayBuffer();
       const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
 
-      console.log(`✅ Audio generado: ${mp3Base64.length} caracteres en base64`);
+      const duration = Date.now() - startTime;
+      console.log(`✅ Audio generado en ${duration}ms: ${mp3Base64.length} caracteres`);
+      
       return mp3Base64;
 
     } catch (error) {
@@ -80,6 +85,7 @@ wss.on('connection', function connection(ws, req) {
 
     try {
       console.log('🔊 Enviando audio al bot de Recall.ai...');
+      const startTime = Date.now();
       
       const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
         method: 'POST',
@@ -94,8 +100,10 @@ wss.on('connection', function connection(ws, req) {
         })
       });
 
+      const duration = Date.now() - startTime;
+
       if (response.ok) {
-        console.log('✅ Audio MP3 enviado exitosamente al bot');
+        console.log(`✅ Audio enviado al bot en ${duration}ms`);
       } else {
         const error = await response.text();
         console.error('❌ Error enviando audio al bot:', response.status, error);
@@ -105,10 +113,11 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // Función para obtener respuesta de GPT-4
+  // Función OPTIMIZADA para obtener respuesta de GPT-4
   async function getGPT4Response(userMessage) {
     try {
-      console.log('🤖 Obteniendo respuesta de GPT-4...');
+      console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
+      const startTime = Date.now();
 
       conversationHistory.push({
         role: 'user',
@@ -130,8 +139,11 @@ wss.on('connection', function connection(ws, req) {
             },
             ...conversationHistory
           ],
-          temperature: 0.8,
-          max_tokens: 200
+          temperature: 0.7,
+          max_tokens: 150, // ✅ Reducido para respuestas más cortas y rápidas
+          top_p: 1,
+          frequency_penalty: 0,
+          presence_penalty: 0
         })
       });
 
@@ -152,7 +164,9 @@ wss.on('connection', function connection(ws, req) {
         conversationHistory = conversationHistory.slice(-10);
       }
 
-      console.log('🎯 Respuesta de GPT-4:', assistantMessage);
+      const duration = Date.now() - startTime;
+      console.log(`🎯 Respuesta de GPT-4 en ${duration}ms:`, assistantMessage);
+      
       return assistantMessage;
 
     } catch (error) {
@@ -169,12 +183,15 @@ wss.on('connection', function connection(ws, req) {
   async function sendToAlex(text) {
     try {
       console.log('\n📤 Procesando mensaje para Alex:', text);
+      const totalStartTime = Date.now();
 
+      // ✅ OPTIMIZACIÓN: Ejecutar en secuencia pero con tracking de tiempo
       const responseText = await getGPT4Response(text);
       const audioBase64 = await generateElevenLabsAudio(responseText);
       await sendAudioToBot(audioBase64);
 
-      console.log('✅ Proceso completo: texto → audio → enviado');
+      const totalDuration = Date.now() - totalStartTime;
+      console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
 
     } catch (error) {
       console.error('❌ Error en sendToAlex:', error.message);
