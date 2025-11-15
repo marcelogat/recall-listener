@@ -14,12 +14,11 @@ console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 const SILENCE_TIMEOUT = 3000;
 
-// Perfil de Alex
 const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
 Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
 Tu rol es asistir en reuniones cuando te mencionen por nombre.`;
 
-wss.on('connection', function connection(ws_client, req) {
+wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
@@ -28,7 +27,6 @@ wss.on('connection', function connection(ws_client, req) {
   let lastSpeaker = null;
   let openaiWs = null;
 
-  // Función para inicializar conexión con OpenAI
   function initOpenAI() {
     console.log('\n🤖 Iniciando sesión con OpenAI Realtime API...');
     
@@ -42,7 +40,6 @@ wss.on('connection', function connection(ws_client, req) {
     openaiWs.on('open', () => {
       console.log('✅ Conexión con OpenAI establecida');
       
-      // Configurar sesión inicial
       const sessionConfig = {
         type: 'session.update',
         session: {
@@ -63,7 +60,6 @@ wss.on('connection', function connection(ws_client, req) {
       try {
         const event = JSON.parse(data.toString());
         
-        // Filtrar solo respuestas de texto
         if (event.type === 'response.text.delta') {
           console.log('💬 Alex (parcial):', event.delta);
         }
@@ -83,7 +79,6 @@ wss.on('connection', function connection(ws_client, req) {
           }
         }
 
-        // Log de errores
         if (event.type === 'error') {
           console.error('❌ Error de OpenAI:', event.error);
         }
@@ -102,16 +97,13 @@ wss.on('connection', function connection(ws_client, req) {
     });
   }
 
-  // Inicializar OpenAI al conectar
   initOpenAI();
 
-  // Función para detectar si mencionan a Alex
   function detectAlexMention(text) {
     const lowerText = text.toLowerCase();
     return lowerText.includes('alex');
   }
 
-  // Función para enviar mensaje a OpenAI
   function sendToOpenAI(text) {
     if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
       console.log('⚠️ OpenAI no está conectado. Reintentando...');
@@ -137,7 +129,6 @@ wss.on('connection', function connection(ws_client, req) {
 
     openaiWs.send(JSON.stringify(message));
     
-    // Solicitar respuesta
     const responseCreate = {
       type: 'response.create'
     };
@@ -150,7 +141,7 @@ wss.on('connection', function connection(ws_client, req) {
 
     try {
       const fullText = currentUtterance.map(word => word.text).join(' ');
-      const speaker = currentUtterance[0].speakerId;
+      const speaker = currentUtterance[0].speaker;
       const speakerName = currentUtterance[0].speakerName;
       const startTime = currentUtterance[0].start_time;
       const endTime = currentUtterance[currentUtterance.length - 1].end_time;
@@ -161,7 +152,6 @@ wss.on('connection', function connection(ws_client, req) {
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${currentUtterance.length}`);
 
-      // Detectar mención de Alex
       if (detectAlexMention(fullText)) {
         console.log('🔔 ¡Alex fue mencionado! Enviando a OpenAI...');
         sendToOpenAI(fullText);
@@ -194,13 +184,24 @@ wss.on('connection', function connection(ws_client, req) {
     }
   }
 
-  ws_client.on('message', function incoming(message) {
+  // 🔍 DEBUGGING: Log de TODOS los mensajes que llegan
+  ws.on('message', function incoming(message) {
+    console.log('\n🔍 ===== MENSAJE RECIBIDO =====');
+    console.log('📦 Mensaje raw:', message.toString());
+    
     try {
       const data = JSON.parse(message);
+      console.log('📋 Tipo de evento:', data.event);
+      console.log('📋 Estructura completa:', JSON.stringify(data, null, 2));
       
       if (data.event === 'transcript') {
+        console.log('✅ Es un evento de transcript');
+        
         const words = data.data?.data?.words;
         const eventType = data.data?.type;
+        
+        console.log('📝 Event type:', eventType);
+        console.log('📝 Palabras encontradas:', words ? words.length : 'NINGUNA');
 
         if (words && words.length > 0 && eventType === 'transcript.data') {
           console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
@@ -241,14 +242,19 @@ wss.on('connection', function connection(ws_client, req) {
         } else {
           console.log(`   ⏭️  Ignorando partial_data (esperando transcript.data completo)`);
         }
+      } else {
+        console.log(`⚠️ Evento diferente a 'transcript': ${data.event}`);
       }
       
     } catch (e) {
       console.error('❌ Error procesando mensaje:', e.message);
+      console.error('❌ Stack:', e.stack);
     }
+    
+    console.log('🔍 ===== FIN DEL MENSAJE =====\n');
   });
 
-  ws_client.on('close', async function close(code, reason) {
+  ws.on('close', async function close(code, reason) {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
     console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
     
@@ -271,17 +277,17 @@ wss.on('connection', function connection(ws_client, req) {
     }
   });
 
-  ws_client.on('error', function error(err) {
+  ws.on('error', function error(err) {
     console.error('❌ Error en WebSocket:', err.message);
   });
 
   const pingInterval = setInterval(() => {
-    if (ws_client.readyState === 1) {
-      ws_client.ping();
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
     }
   }, 30000);
 
-  ws_client.on('close', () => {
+  ws.on('close', () => {
     clearInterval(pingInterval);
   });
 });
