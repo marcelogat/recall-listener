@@ -9,7 +9,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'JNcXxzrlvFDXcrGo2b47';
 
 const wss = new WebSocket.Server({ port: 8080 });
 
@@ -122,7 +122,7 @@ wss.on('connection', function connection(ws, req) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o',
+          model: 'gpt-4o-mini-realtime',
           messages: [
             {
               role: 'system',
