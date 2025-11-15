@@ -122,7 +122,7 @@ wss.on('connection', function connection(ws, req) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini-realtime-preview',
+          model: 'gpt-4o-mini',
           messages: [
             {
               role: 'system',
