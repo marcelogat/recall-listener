@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
+const fetch = require('node-fetch');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -7,6 +8,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
+const RECALL_API_KEY = process.env.RECALL_API_KEY;
 
 const wss = new WebSocket.Server({ port: 8080 });
 
@@ -16,7 +18,8 @@ const SILENCE_TIMEOUT = 3000;
 
 const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
 Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
-Tu rol es asistir en reuniones cuando te mencionen por nombre.`;
+Tu rol es asistir en reuniones cuando te mencionen por nombre.
+Responde de forma concisa y profesional.`;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
@@ -26,6 +29,40 @@ wss.on('connection', function connection(ws, req) {
   let timeoutId = null;
   let lastSpeaker = null;
   let openaiWs = null;
+  let botId = null;
+
+  // Función para enviar audio al bot de Recall.ai
+  async function sendAudioToBot(audioBase64) {
+    if (!botId) {
+      console.error('❌ No hay bot_id disponible para enviar audio');
+      return;
+    }
+
+    try {
+      console.log('🔊 Enviando audio al bot de Recall.ai...');
+      
+      const response = await fetch(`https://api.recall.ai/api/v1/bot/${botId}/send_audio/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${RECALL_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          audio: audioBase64,
+          sample_rate: 24000
+        })
+      });
+
+      if (response.ok) {
+        console.log('✅ Audio enviado exitosamente al bot');
+      } else {
+        const error = await response.text();
+        console.error('❌ Error enviando audio al bot:', error);
+      }
+    } catch (error) {
+      console.error('❌ Error en sendAudioToBot:', error.message);
+    }
+  }
 
   function initOpenAI() {
     console.log('\n🤖 Iniciando sesión con OpenAI Realtime API...');
@@ -43,12 +80,13 @@ wss.on('connection', function connection(ws, req) {
       const sessionConfig = {
         type: 'session.update',
         session: {
-          modalities: ['text'],
+          modalities: ['text', 'audio'],
           instructions: ALEX_PROFILE,
           voice: 'alloy',
           input_audio_format: 'pcm16',
           output_audio_format: 'pcm16',
-          turn_detection: null
+          turn_detection: null,
+          temperature: 0.8
         }
       };
       
@@ -56,16 +94,39 @@ wss.on('connection', function connection(ws, req) {
       console.log('📤 Perfil de Alex enviado a OpenAI');
     });
 
+    let audioChunks = [];
+
     openaiWs.on('message', (data) => {
       try {
         const event = JSON.parse(data.toString());
         
+        // Capturar chunks de audio
+        if (event.type === 'response.audio.delta') {
+          console.log('🎵 Recibiendo chunk de audio de OpenAI...');
+          audioChunks.push(event.delta);
+        }
+
+        // Cuando termina el audio completo
+        if (event.type === 'response.audio.done') {
+          console.log('✅ Audio completo recibido de OpenAI');
+          
+          // Combinar todos los chunks
+          const fullAudio = audioChunks.join('');
+          console.log(`📦 Audio total: ${fullAudio.length} caracteres en base64`);
+          
+          // Enviar al bot de Recall.ai
+          sendAudioToBot(fullAudio);
+          
+          // Limpiar chunks
+          audioChunks = [];
+        }
+
         if (event.type === 'response.text.delta') {
           console.log('💬 Alex (parcial):', event.delta);
         }
         
         if (event.type === 'response.text.done') {
-          console.log('✅ Alex (completo):', event.text);
+          console.log('✅ Alex (texto completo):', event.text);
         }
 
         if (event.type === 'response.done') {
@@ -73,8 +134,10 @@ wss.on('connection', function connection(ws, req) {
           if (response.output && response.output.length > 0) {
             const content = response.output[0].content;
             if (content && content.length > 0) {
-              const text = content[0].text;
-              console.log('\n🎯 RESPUESTA FINAL DE ALEX:', text);
+              const text = content.find(c => c.type === 'text');
+              if (text) {
+                console.log('\n🎯 RESPUESTA FINAL DE ALEX:', text.text);
+              }
             }
           }
         }
@@ -130,10 +193,14 @@ wss.on('connection', function connection(ws, req) {
     openaiWs.send(JSON.stringify(message));
     
     const responseCreate = {
-      type: 'response.create'
+      type: 'response.create',
+      response: {
+        modalities: ['text', 'audio']
+      }
     };
     
     openaiWs.send(JSON.stringify(responseCreate));
+    console.log('🎤 Solicitando respuesta con audio...');
   }
 
   async function processCompleteUtterance() {
@@ -151,6 +218,7 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   📝 Texto: "${fullText}"`);
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${currentUtterance.length}`);
+      console.log(`   🤖 Bot ID: ${botId}`);
 
       if (detectAlexMention(fullText)) {
         console.log('🔔 ¡Alex fue mencionado! Enviando a OpenAI...');
@@ -161,6 +229,7 @@ wss.on('connection', function connection(ws, req) {
         .from('transcripts')
         .insert([
           {
+            bot_id: botId,
             speaker_id: speaker,
             speaker_name: speakerName,
             text: fullText,
@@ -188,12 +257,14 @@ wss.on('connection', function connection(ws, req) {
     try {
       const data = JSON.parse(message);
       
-      // ✅ CORREGIDO: Ahora detecta correctamente transcript.data
       if (data.event === 'transcript.data') {
-        console.log('\n✅ Evento transcript.data recibido');
-        
         const words = data.data?.data?.words;
         const participant = data.data?.data?.participant;
+        
+        if (!botId && data.data?.bot?.id) {
+          botId = data.data.bot.id;
+          console.log(`🤖 Bot ID capturado: ${botId}`);
+        }
 
         if (words && words.length > 0 && participant) {
           console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
@@ -203,7 +274,6 @@ wss.on('connection', function connection(ws, req) {
 
           if (lastSpeaker !== null && lastSpeaker !== speakerId) {
             console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
-            console.log('   💾 Procesando transcript del speaker anterior...');
             processCompleteUtterance();
           }
 
@@ -233,9 +303,7 @@ wss.on('connection', function connection(ws, req) {
           console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
         }
       } else if (data.event === 'transcript.partial_data') {
-        console.log('   ⏭️  Ignorando partial_data (esperando transcript.data completo)');
-      } else {
-        console.log(`📌 Otro evento: ${data.event}`);
+        console.log('   ⏭️  Ignorando partial_data');
       }
       
     } catch (e) {
@@ -248,7 +316,6 @@ wss.on('connection', function connection(ws, req) {
     console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
     
     if (currentUtterance.length > 0) {
-      console.log('💾 Procesando transcript pendiente...');
       await processCompleteUtterance();
     }
     
