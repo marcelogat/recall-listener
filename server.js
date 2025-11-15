@@ -12,9 +12,10 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'; // Adam (puedes cambiar)
 
 const wss = new WebSocket.Server({ port: 8080 });
 
@@ -23,9 +24,33 @@ console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 const SILENCE_TIMEOUT = 3000;
 
 const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
-Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
-Tu rol es asistir en reuniones cuando te mencionen por nombre.
-Responde de forma muy concisa, en 1-2 oraciones máximo.`;
+Tienes 32 años y amplia experiencia trabajando en empresas internacionales liderando equipos y proyectos complejos.
+
+Tu personalidad es cálida, profesional y colaborativa. Hablas de forma natural y conversacional, como un colega experimentado que está genuinamente interesado en ayudar.
+
+Cuando te llaman en una reunión:
+- Saluda de forma amigable y muestra que estás presente y atento
+- Responde con entusiasmo profesional, mostrando interés genuino
+- Da respuestas completas y útiles (2-4 oraciones está perfecto)
+- Usa un tono conversacional y cercano, como si estuvieras físicamente en la sala
+- Comparte insights basados en tu experiencia cuando sea relevante
+- Pregunta si necesitan más detalles o si puedes ayudar con algo específico
+- Usa expresiones naturales argentinas ocasionalmente (pero sin exagerar)
+
+Ejemplos de cómo deberías responder:
+- "¡Hola! Sí, aquí estoy. ¿En qué los puedo ayudar hoy?"
+- "Claro que sí, con gusto. Basándome en proyectos similares que he manejado, les recomendaría enfocarse primero en [X] porque [razón]. ¿Quieren que profundice en algún aspecto?"
+- "Buena pregunta. En mi experiencia, cuando nos enfrentamos a esto lo mejor es [sugerencia detallada]. ¿Tiene sentido para el equipo o prefieren explorar otras alternativas?"
+- "Dale, perfecto. Lo que yo haría es [explicación]. ¿Eso se alinea con lo que tenían en mente?"
+
+Lo que NO debes hacer:
+- No des respuestas de una sola palabra o muy cortantes
+- No seas excesivamente formal o corporativo
+- No suenes como un asistente virtual genérico
+- No uses frases como "como modelo de lenguaje" o "como IA"
+- No repitas exactamente lo que te dijeron, agrega valor
+
+Recuerda: Eres un PM real con experiencia real. Habla como tal.`;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
@@ -34,47 +59,48 @@ wss.on('connection', function connection(ws, req) {
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
-  let openaiWs = null;
   let botId = null;
+  let conversationHistory = []; // Para mantener contexto
 
-  // Función para convertir PCM16 a MP3 base64
-  async function convertPCM16ToMP3(pcm16Base64) {
+  // Función para generar audio con ElevenLabs
+  async function generateElevenLabsAudio(text) {
     try {
-      console.log('🔄 Convirtiendo PCM16 a MP3...');
-      
-      // Crear archivos temporales
-      const tempDir = '/tmp';
-      const timestamp = Date.now();
-      const pcmFile = path.join(tempDir, `audio_${timestamp}.pcm`);
-      const mp3File = path.join(tempDir, `audio_${timestamp}.mp3`);
+      console.log('🎙️ Generando audio con ElevenLabs...');
+      console.log(`📝 Texto: "${text}"`);
 
-      // Decodificar base64 y guardar como PCM
-      const pcmBuffer = Buffer.from(pcm16Base64, 'base64');
-      await fs.writeFile(pcmFile, pcmBuffer);
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_multilingual_v2', // Soporta español argentino
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.5,
+            use_speaker_boost: true
+          }
+        })
+      });
 
-      console.log(`📁 Archivo PCM guardado: ${pcmFile} (${pcmBuffer.length} bytes)`);
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
+      }
 
-      // Convertir PCM a MP3 usando ffmpeg
-      // OpenAI usa PCM16 a 24kHz mono
-      const ffmpegCmd = `ffmpeg -f s16le -ar 24000 -ac 1 -i ${pcmFile} -codec:a libmp3lame -b:a 128k ${mp3File}`;
-      
-      console.log(`🎬 Ejecutando: ${ffmpegCmd}`);
-      await execAsync(ffmpegCmd);
+      // ElevenLabs devuelve MP3 directamente
+      const audioBuffer = await response.arrayBuffer();
+      const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
 
-      // Leer el MP3 y convertir a base64
-      const mp3Buffer = await fs.readFile(mp3File);
-      const mp3Base64 = mp3Buffer.toString('base64');
-
-      console.log(`✅ Conversión exitosa: ${mp3Base64.length} caracteres en base64`);
-
-      // Limpiar archivos temporales
-      await fs.unlink(pcmFile);
-      await fs.unlink(mp3File);
-
+      console.log(`✅ Audio generado: ${mp3Base64.length} caracteres en base64`);
       return mp3Base64;
 
     } catch (error) {
-      console.error('❌ Error convirtiendo PCM16 a MP3:', error.message);
+      console.error('❌ Error generando audio con ElevenLabs:', error.message);
       throw error;
     }
   }
@@ -104,7 +130,6 @@ wss.on('connection', function connection(ws, req) {
       });
 
       if (response.ok) {
-        const result = await response.json();
         console.log('✅ Audio MP3 enviado exitosamente al bot');
       } else {
         const error = await response.text();
@@ -115,149 +140,88 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  function initOpenAI() {
-    console.log('\n🤖 Iniciando sesión con OpenAI Realtime API...');
-    
-    openaiWs = new WebSocket(OPENAI_WS_URL, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
+  // Función para obtener respuesta de GPT-4
+  async function getGPT4Response(userMessage) {
+    try {
+      console.log('🤖 Obteniendo respuesta de GPT-4...');
+
+      // Agregar mensaje del usuario al historial
+      conversationHistory.push({
+        role: 'user',
+        content: userMessage
+      });
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'system',
+              content: ALEX_PROFILE
+            },
+            ...conversationHistory
+          ],
+          temperature: 0.9,
+          max_tokens: 500
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`OpenAI error: ${response.status} - ${error}`);
       }
-    });
 
-    openaiWs.on('open', () => {
-      console.log('✅ Conexión con OpenAI establecida');
-      
-      const sessionConfig = {
-        type: 'session.update',
-        session: {
-          modalities: ['text', 'audio'],
-          instructions: ALEX_PROFILE,
-          voice: 'alloy',
-          input_audio_format: 'pcm16',
-          output_audio_format: 'pcm16',
-          turn_detection: null,
-          temperature: 0.8
-        }
-      };
-      
-      openaiWs.send(JSON.stringify(sessionConfig));
-      console.log('📤 Perfil de Alex enviado a OpenAI');
-    });
+      const data = await response.json();
+      const assistantMessage = data.choices[0].message.content;
 
-    let audioChunks = [];
+      // Agregar respuesta al historial
+      conversationHistory.push({
+        role: 'assistant',
+        content: assistantMessage
+      });
 
-    openaiWs.on('message', (data) => {
-      try {
-        const event = JSON.parse(data.toString());
-        
-        // Capturar chunks de audio
-        if (event.type === 'response.audio.delta') {
-          console.log('🎵 Recibiendo chunk de audio de OpenAI...');
-          audioChunks.push(event.delta);
-        }
-
-        // Cuando termina el audio completo
-        if (event.type === 'response.audio.done') {
-          console.log('✅ Audio completo recibido de OpenAI');
-          
-          // Combinar todos los chunks
-          const fullAudio = audioChunks.join('');
-          console.log(`📦 Audio PCM16 total: ${fullAudio.length} caracteres en base64`);
-          
-          // Convertir PCM16 a MP3 y enviar al bot
-          convertPCM16ToMP3(fullAudio)
-            .then(mp3Audio => {
-              sendAudioToBot(mp3Audio);
-            })
-            .catch(err => {
-              console.error('❌ Error en conversión:', err);
-            });
-          
-          // Limpiar chunks
-          audioChunks = [];
-        }
-
-        if (event.type === 'response.text.delta') {
-          console.log('💬 Alex (parcial):', event.delta);
-        }
-        
-        if (event.type === 'response.text.done') {
-          console.log('✅ Alex (texto completo):', event.text);
-        }
-
-        if (event.type === 'response.done') {
-          const response = event.response;
-          if (response.output && response.output.length > 0) {
-            const content = response.output[0].content;
-            if (content && content.length > 0) {
-              const text = content.find(c => c.type === 'text');
-              if (text) {
-                console.log('\n🎯 RESPUESTA FINAL DE ALEX:', text.text);
-              }
-            }
-          }
-        }
-
-        if (event.type === 'error') {
-          console.error('❌ Error de OpenAI:', event.error);
-        }
-
-      } catch (e) {
-        console.error('❌ Error procesando mensaje de OpenAI:', e.message);
+      // Mantener solo los últimos 10 mensajes para no exceder límites
+      if (conversationHistory.length > 10) {
+        conversationHistory = conversationHistory.slice(-10);
       }
-    });
 
-    openaiWs.on('error', (error) => {
-      console.error('❌ Error en WebSocket de OpenAI:', error.message);
-    });
+      console.log('🎯 Respuesta de GPT-4:', assistantMessage);
+      return assistantMessage;
 
-    openaiWs.on('close', () => {
-      console.log('🔌 Conexión con OpenAI cerrada');
-    });
+    } catch (error) {
+      console.error('❌ Error obteniendo respuesta de GPT-4:', error.message);
+      throw error;
+    }
   }
-
-  initOpenAI();
 
   function detectAlexMention(text) {
     const lowerText = text.toLowerCase();
     return lowerText.includes('alex');
   }
 
-  function sendToOpenAI(text) {
-    if (!openaiWs || openaiWs.readyState !== WebSocket.OPEN) {
-      console.log('⚠️ OpenAI no está conectado. Reintentando...');
-      initOpenAI();
-      return;
+  async function sendToAlex(text) {
+    try {
+      console.log('\n📤 Procesando mensaje para Alex:', text);
+
+      // 1. Obtener respuesta de texto de GPT-4
+      const responseText = await getGPT4Response(text);
+
+      // 2. Generar audio con ElevenLabs
+      const audioBase64 = await generateElevenLabsAudio(responseText);
+
+      // 3. Enviar audio al bot
+      await sendAudioToBot(audioBase64);
+
+      console.log('✅ Proceso completo: texto → audio → enviado');
+
+    } catch (error) {
+      console.error('❌ Error en sendToAlex:', error.message);
     }
-
-    console.log('\n📤 Enviando a Alex:', text);
-
-    const message = {
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [
-          {
-            type: 'input_text',
-            text: text
-          }
-        ]
-      }
-    };
-
-    openaiWs.send(JSON.stringify(message));
-    
-    const responseCreate = {
-      type: 'response.create',
-      response: {
-        modalities: ['text', 'audio']
-      }
-    };
-    
-    openaiWs.send(JSON.stringify(responseCreate));
-    console.log('🎤 Solicitando respuesta con audio...');
   }
 
   async function processCompleteUtterance() {
@@ -278,32 +242,9 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   🤖 Bot ID: ${botId}`);
 
       if (detectAlexMention(fullText)) {
-        console.log('🔔 ¡Alex fue mencionado! Enviando a OpenAI...');
-        sendToOpenAI(fullText);
+        console.log('🔔 ¡Alex fue mencionado! Procesando respuesta...');
+        await sendToAlex(fullText);
       }
-
-      // Comentado temporalmente hasta que arregles la estructura de Supabase
-      /*
-      const { data, error } = await supabase
-        .from('transcripts')
-        .insert([
-          {
-            speaker_id: speaker,
-            speaker_name: speakerName,
-            text: fullText,
-            start_time: startTime,
-            end_time: endTime,
-            word_count: currentUtterance.length,
-            words: currentUtterance
-          }
-        ]);
-
-      if (error) {
-        console.error('❌ Error guardando en Supabase:', error.message);
-      } else {
-        console.log('✅ Transcript guardado en Supabase exitosamente');
-      }
-      */
 
       currentUtterance = [];
 
@@ -380,15 +321,6 @@ wss.on('connection', function connection(ws, req) {
     
     if (timeoutId) {
       clearTimeout(timeoutId);
-    }
-
-    if (openaiWs) {
-      try {
-        openaiWs.close();
-        console.log('🤖 Conexión con OpenAI cerrada');
-      } catch (e) {
-        console.error('❌ Error cerrando OpenAI:', e.message);
-      }
     }
   });
 
