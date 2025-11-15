@@ -1,11 +1,5 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const fs = require('fs').promises;
-const path = require('path');
-
-const execAsync = promisify(exec);
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -15,7 +9,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'; // Adam (puedes cambiar)
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
 
 const wss = new WebSocket.Server({ port: 8080 });
 
@@ -23,34 +17,7 @@ console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 const SILENCE_TIMEOUT = 3000;
 
-const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
-Tienes 32 años y amplia experiencia trabajando en empresas internacionales liderando equipos y proyectos complejos.
-
-Tu personalidad es cálida, profesional y colaborativa. Hablas de forma natural y conversacional, como un colega experimentado que está genuinamente interesado en ayudar.
-
-Cuando te llaman en una reunión:
-- Saluda de forma amigable y muestra que estás presente y atento
-- Responde con entusiasmo profesional, mostrando interés genuino
-- Da respuestas completas y útiles (2-4 oraciones está perfecto)
-- Usa un tono conversacional y cercano, como si estuvieras físicamente en la sala
-- Comparte insights basados en tu experiencia cuando sea relevante
-- Pregunta si necesitan más detalles o si puedes ayudar con algo específico
-- Usa expresiones naturales argentinas ocasionalmente (pero sin exagerar)
-
-Ejemplos de cómo deberías responder:
-- "¡Hola! Sí, aquí estoy. ¿En qué los puedo ayudar hoy?"
-- "Claro que sí, con gusto. Basándome en proyectos similares que he manejado, les recomendaría enfocarse primero en [X] porque [razón]. ¿Quieren que profundice en algún aspecto?"
-- "Buena pregunta. En mi experiencia, cuando nos enfrentamos a esto lo mejor es [sugerencia detallada]. ¿Tiene sentido para el equipo o prefieren explorar otras alternativas?"
-- "Dale, perfecto. Lo que yo haría es [explicación]. ¿Eso se alinea con lo que tenían en mente?"
-
-Lo que NO debes hacer:
-- No des respuestas de una sola palabra o muy cortantes
-- No seas excesivamente formal o corporativo
-- No suenes como un asistente virtual genérico
-- No uses frases como "como modelo de lenguaje" o "como IA"
-- No repitas exactamente lo que te dijeron, agrega valor
-
-Recuerda: Eres un PM real con experiencia real. Habla como tal.`;
+const ALEX_PROFILE = `Eres Alex, un project manager de 32 años de Buenos Aires con experiencia en empresas internacionales. Responde de forma amigable y profesional.`;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
@@ -60,7 +27,7 @@ wss.on('connection', function connection(ws, req) {
   let timeoutId = null;
   let lastSpeaker = null;
   let botId = null;
-  let conversationHistory = []; // Para mantener contexto
+  let conversationHistory = [];
 
   // Función para generar audio con ElevenLabs
   async function generateElevenLabsAudio(text) {
@@ -77,7 +44,7 @@ wss.on('connection', function connection(ws, req) {
         },
         body: JSON.stringify({
           text: text,
-          model_id: 'eleven_multilingual_v2', // Soporta español argentino
+          model_id: 'eleven_multilingual_v2',
           voice_settings: {
             stability: 0.5,
             similarity_boost: 0.75,
@@ -92,7 +59,6 @@ wss.on('connection', function connection(ws, req) {
         throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
       }
 
-      // ElevenLabs devuelve MP3 directamente
       const audioBuffer = await response.arrayBuffer();
       const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
 
@@ -114,7 +80,6 @@ wss.on('connection', function connection(ws, req) {
 
     try {
       console.log('🔊 Enviando audio al bot de Recall.ai...');
-      console.log(`📍 URL: https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`);
       
       const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
         method: 'POST',
@@ -145,7 +110,6 @@ wss.on('connection', function connection(ws, req) {
     try {
       console.log('🤖 Obteniendo respuesta de GPT-4...');
 
-      // Agregar mensaje del usuario al historial
       conversationHistory.push({
         role: 'user',
         content: userMessage
@@ -166,8 +130,8 @@ wss.on('connection', function connection(ws, req) {
             },
             ...conversationHistory
           ],
-          temperature: 0.9,
-          max_tokens: 500
+          temperature: 0.8,
+          max_tokens: 200
         })
       });
 
@@ -179,13 +143,11 @@ wss.on('connection', function connection(ws, req) {
       const data = await response.json();
       const assistantMessage = data.choices[0].message.content;
 
-      // Agregar respuesta al historial
       conversationHistory.push({
         role: 'assistant',
         content: assistantMessage
       });
 
-      // Mantener solo los últimos 10 mensajes para no exceder límites
       if (conversationHistory.length > 10) {
         conversationHistory = conversationHistory.slice(-10);
       }
@@ -208,13 +170,8 @@ wss.on('connection', function connection(ws, req) {
     try {
       console.log('\n📤 Procesando mensaje para Alex:', text);
 
-      // 1. Obtener respuesta de texto de GPT-4
       const responseText = await getGPT4Response(text);
-
-      // 2. Generar audio con ElevenLabs
       const audioBase64 = await generateElevenLabsAudio(responseText);
-
-      // 3. Enviar audio al bot
       await sendAudioToBot(audioBase64);
 
       console.log('✅ Proceso completo: texto → audio → enviado');
@@ -239,7 +196,6 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   📝 Texto: "${fullText}"`);
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${currentUtterance.length}`);
-      console.log(`   🤖 Bot ID: ${botId}`);
 
       if (detectAlexMention(fullText)) {
         console.log('🔔 ¡Alex fue mencionado! Procesando respuesta...');
