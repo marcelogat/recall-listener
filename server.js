@@ -184,30 +184,22 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // 🔍 DEBUGGING: Log de TODOS los mensajes que llegan
   ws.on('message', function incoming(message) {
-    console.log('\n🔍 ===== MENSAJE RECIBIDO =====');
-    console.log('📦 Mensaje raw:', message.toString());
-    
     try {
       const data = JSON.parse(message);
-      console.log('📋 Tipo de evento:', data.event);
-      console.log('📋 Estructura completa:', JSON.stringify(data, null, 2));
       
-      if (data.event === 'transcript') {
-        console.log('✅ Es un evento de transcript');
+      // ✅ CORREGIDO: Ahora detecta correctamente transcript.data
+      if (data.event === 'transcript.data') {
+        console.log('\n✅ Evento transcript.data recibido');
         
         const words = data.data?.data?.words;
-        const eventType = data.data?.type;
-        
-        console.log('📝 Event type:', eventType);
-        console.log('📝 Palabras encontradas:', words ? words.length : 'NINGUNA');
+        const participant = data.data?.data?.participant;
 
-        if (words && words.length > 0 && eventType === 'transcript.data') {
+        if (words && words.length > 0 && participant) {
           console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
 
-          const speakerId = words[0].speaker_id || 0;
-          const speakerName = words[0].speaker_name || `Speaker ${speakerId}`;
+          const speakerId = participant.id;
+          const speakerName = participant.name || `Speaker ${speakerId}`;
 
           if (lastSpeaker !== null && lastSpeaker !== speakerId) {
             console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
@@ -239,19 +231,16 @@ wss.on('connection', function connection(ws, req) {
           }, SILENCE_TIMEOUT);
 
           console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
-        } else {
-          console.log(`   ⏭️  Ignorando partial_data (esperando transcript.data completo)`);
         }
+      } else if (data.event === 'transcript.partial_data') {
+        console.log('   ⏭️  Ignorando partial_data (esperando transcript.data completo)');
       } else {
-        console.log(`⚠️ Evento diferente a 'transcript': ${data.event}`);
+        console.log(`📌 Otro evento: ${data.event}`);
       }
       
     } catch (e) {
       console.error('❌ Error procesando mensaje:', e.message);
-      console.error('❌ Stack:', e.stack);
     }
-    
-    console.log('🔍 ===== FIN DEL MENSAJE =====\n');
   });
 
   ws.on('close', async function close(code, reason) {
