@@ -5,11 +5,19 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
+
 const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 const SILENCE_TIMEOUT = 3000;
+
+// Perfil de Alex
+const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
+Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
+Tu rol es asistir en reuniones cuando te mencionen por nombre.`;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
@@ -18,6 +26,84 @@ wss.on('connection', function connection(ws, req) {
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
+  let openaiWs = null;
+  let openaiReady = false;
+
+  // Función para inicializar conexión con OpenAI
+  function initOpenAI() {
+    if (!OPENAI_API_KEY) {
+      console.log('⚠️  OPENAI_API_KEY no configurada - OpenAI deshabilitado');
+      return;
+    }
+
+    console.log('\n🤖 Iniciando sesión con OpenAI Realtime API...');
+    
+    try {
+      openaiWs = new WebSocket(OPENAI_WS_URL, {
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'OpenAI-Beta': 'realtime=v1'
+        }
+      });
+
+      openaiWs.on('open', function() {
+        console.log('✅ Conectado a OpenAI Realtime API');
+        
+        try {
+          const sessionUpdate = {
+            type: 'session.update',
+            session: {
+              modalities: ['text'],
+              instructions: ALEX_PROFILE,
+              voice: 'alloy',
+              input_audio_format: 'pcm16',
+              output_audio_format: 'pcm16',
+              turn_detection: null
+            }
+          };
+          
+          openaiWs.send(JSON.stringify(sessionUpdate));
+          console.log('📋 Perfil de Alex enviado a OpenAI');
+          openaiReady = true;
+        } catch (e) {
+          console.error('❌ Error enviando configuración a OpenAI:', e.message);
+        }
+      });
+
+      openaiWs.on('message', function(message) {
+        try {
+          const event = JSON.parse(message);
+          
+          if (event.type === 'response.text.delta') {
+            console.log(`🤖 ALEX: ${event.delta}`);
+          } else if (event.type === 'response.text.done') {
+            console.log(`\n✅ ALEX terminó: ${event.text}`);
+          } else if (event.type === 'response.done') {
+            console.log(`✅ Respuesta completa de OpenAI`);
+          } else {
+            console.log(`📨 OpenAI event: ${event.type}`);
+          }
+        } catch (e) {
+          console.error('❌ Error procesando mensaje de OpenAI:', e.message);
+        }
+      });
+
+      openaiWs.on('error', function(error) {
+        console.error('❌ Error en OpenAI WebSocket:', error.message);
+        openaiReady = false;
+      });
+
+      openaiWs.on('close', function() {
+        console.log('❌ Desconectado de OpenAI');
+        openaiReady = false;
+      });
+    } catch (error) {
+      console.error('❌ Error inicializando OpenAI:', error.message);
+    }
+  }
+
+  // Iniciar OpenAI al conectar
+  initOpenAI();
 
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0) return;
@@ -36,10 +122,41 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   Duración: ${startTime}s - ${endTime}s`);
       console.log('='.repeat(80));
 
-      // Verificar si mencionan a "Alex"
+      // Verificar si mencionan a "Alex" (case insensitive)
       if (fullText.toLowerCase().includes('alex')) {
         console.log('\n🔔 ¡ALEX FUE MENCIONADO!');
-        console.log(`📝 Texto completo: "${fullText}"`);
+        
+        if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+          try {
+            const conversationItem = {
+              type: 'conversation.item.create',
+              item: {
+                type: 'message',
+                role: 'user',
+                content: [
+                  {
+                    type: 'input_text',
+                    text: fullText
+                  }
+                ]
+              }
+            };
+            
+            openaiWs.send(JSON.stringify(conversationItem));
+            
+            const responseCreate = {
+              type: 'response.create'
+            };
+            
+            openaiWs.send(JSON.stringify(responseCreate));
+            
+            console.log(`📤 Texto enviado a OpenAI: "${fullText}"`);
+          } catch (e) {
+            console.error('❌ Error enviando a OpenAI:', e.message);
+          }
+        } else {
+          console.log(`⚠️  OpenAI no está listo (ready: ${openaiReady})`);
+        }
       }
 
       const { data, error } = await supabase
@@ -81,10 +198,8 @@ wss.on('connection', function connection(ws, req) {
 
       const eventType = data.event;
 
-      // Solo procesar mensajes de transcript
       if (eventType === 'transcript.data' || eventType === 'transcript.partial_data') {
         
-        // ✅ LA ESTRUCTURA CORRECTA ES: data.data.words
         const words = data.data?.data?.words || [];
         const participant = data.data?.data?.participant;
         
@@ -98,7 +213,6 @@ wss.on('connection', function connection(ws, req) {
         console.log(`\n📝 [${speakerName}] Recibidas ${words.length} palabras`);
         console.log(`   Texto: ${words.map(w => w.text).join(' ')}`);
 
-        // Si cambió el speaker, procesar lo anterior
         if (lastSpeaker !== null && lastSpeaker !== speakerId) {
           console.log(`🔄 Cambio de speaker detectado`);
           if (timeoutId) {
@@ -108,7 +222,6 @@ wss.on('connection', function connection(ws, req) {
           await processCompleteUtterance();
         }
 
-        // Agregar palabras - SOLO si es transcript.data (completo)
         if (eventType === 'transcript.data') {
           words.forEach(word => {
             const text = word.text || '';
@@ -156,6 +269,15 @@ wss.on('connection', function connection(ws, req) {
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
+
+    if (openaiWs) {
+      try {
+        openaiWs.close();
+        console.log('🤖 Conexión con OpenAI cerrada');
+      } catch (e) {
+        console.error('❌ Error cerrando OpenAI:', e.message);
+      }
+    }
   });
 
   ws.on('error', function error(err) {
@@ -182,3 +304,10 @@ process.on('unhandledRejection', (reason) => {
 });
 
 console.log('\n📡 Esperando conexiones de Recall.ai...\n');
+```
+
+**Agrega en tu `.env`:**
+```
+SUPABASE_URL=tu_supabase_url
+SUPABASE_ANON_KEY=tu_supabase_key
+OPENAI_API_KEY=sk-proj-tu-clave-de-openai
