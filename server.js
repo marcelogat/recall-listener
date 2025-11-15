@@ -254,9 +254,22 @@ wss.on('connection', function connection(ws_client, req) {
 
       const eventType = data.event;
 
-      if (!ACTIVE_BOT_ID && data.data?.bot_id) {
-        ACTIVE_BOT_ID = data.data.bot_id;
-        console.log('🎯 BOT ID detectado:', ACTIVE_BOT_ID);
+      // 🔥 DEBUG: Mostrar TODOS los eventos para ver estructura
+      console.log(`\n🔍 DEBUG - Evento recibido: ${eventType}`);
+      console.log(`🔍 DEBUG - Data completa:`, JSON.stringify(data, null, 2));
+
+      // 🔥 MEJORAR DETECCIÓN DE BOT_ID - buscar en múltiples lugares
+      if (!ACTIVE_BOT_ID) {
+        if (data.bot_id) {
+          ACTIVE_BOT_ID = data.bot_id;
+          console.log('🎯 BOT ID detectado (root):', ACTIVE_BOT_ID);
+        } else if (data.data?.bot_id) {
+          ACTIVE_BOT_ID = data.data.bot_id;
+          console.log('🎯 BOT ID detectado (data.bot_id):', ACTIVE_BOT_ID);
+        } else if (data.data?.data?.bot_id) {
+          ACTIVE_BOT_ID = data.data.data.bot_id;
+          console.log('🎯 BOT ID detectado (data.data.bot_id):', ACTIVE_BOT_ID);
+        }
       }
 
       if (eventType === 'transcript.data' || eventType === 'transcript.partial_data') {
@@ -283,85 +296,4 @@ wss.on('connection', function connection(ws_client, req) {
           await processCompleteUtterance();
         }
 
-        if (eventType === 'transcript.data') {
-          words.forEach(word => {
-            const text = word.text || '';
-            if (text.trim()) {
-              currentUtterance.push({
-                text: text,
-                speaker: speakerId,
-                speakerName: speakerName,
-                start_time: word.start_timestamp?.relative || 0,
-                end_time: word.end_timestamp?.relative || 0
-              });
-            }
-          });
-
-          lastSpeaker = speakerId;
-
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-          }
-
-          timeoutId = setTimeout(() => {
-            processCompleteUtterance();
-          }, SILENCE_TIMEOUT);
-
-          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
-        } else {
-          console.log(`   ⏭️  Ignorando partial_data (esperando transcript.data completo)`);
-        }
-      }
-      
-    } catch (e) {
-      console.error('❌ Error procesando mensaje:', e.message);
-    }
-  });
-
-  ws_client.on('close', async function close(code, reason) {
-    console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
-    console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
-    
-    if (currentUtterance.length > 0) {
-      console.log('💾 Procesando transcript pendiente...');
-      await processCompleteUtterance();
-    }
-    
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-
-    if (openaiWs) {
-      try {
-        openaiWs.close();
-        console.log('🤖 Conexión con OpenAI cerrada');
-      } catch (e) {
-        console.error('❌ Error cerrando OpenAI:', e.message);
-      }
-    }
-  });
-
-  ws_client.on('error', function error(err) {
-    console.error('❌ Error en WebSocket:', err.message);
-  });
-
-  const pingInterval = setInterval(() => {
-    if (ws_client.readyState === 1) {
-      ws_client.ping();
-    }
-  }, 30000);
-
-  ws_client.on('close', () => {
-    clearInterval(pingInterval);
-  });
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Error no capturado:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('❌ Promesa rechazada:', reason);
-});
-
-console.log('\n📡 Esperando conexiones de Recall.ai...\n');
+        if (eventType === 'transcript.data'
