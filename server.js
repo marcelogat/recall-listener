@@ -8,6 +8,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
+const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 
 const wss = new WebSocket.Server({ port: 8080 });
 
@@ -18,7 +19,7 @@ const SILENCE_TIMEOUT = 3000;
 const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
 Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
 Tu rol es asistir en reuniones cuando te mencionen por nombre.
-Responde de forma concisa y profesional.`;
+Responde de forma muy concisa, en 1-2 oraciones máximo.`;
 
 wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
@@ -30,6 +31,14 @@ wss.on('connection', function connection(ws, req) {
   let openaiWs = null;
   let botId = null;
 
+  // Función para convertir PCM16 a MP3 base64
+  async function convertPCM16ToMP3(pcm16Base64) {
+    // Por ahora, OpenAI solo da audio en formato pcm16
+    // Necesitamos convertirlo a MP3
+    // Temporal: retornar el mismo audio (Recall.ai podría aceptar pcm16)
+    return pcm16Base64;
+  }
+
   // Función para enviar audio al bot de Recall.ai
   async function sendAudioToBot(audioBase64) {
     if (!botId) {
@@ -39,24 +48,27 @@ wss.on('connection', function connection(ws, req) {
 
     try {
       console.log('🔊 Enviando audio al bot de Recall.ai...');
+      console.log(`📍 URL: https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`);
       
-      const response = await fetch(`https://api.recall.ai/api/v1/bot/${botId}/send_audio/`, {
+      const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
         method: 'POST',
         headers: {
           'Authorization': `Token ${RECALL_API_KEY}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
         },
         body: JSON.stringify({
-          audio: audioBase64,
-          sample_rate: 24000
+          kind: 'mp3',
+          b64_data: audioBase64
         })
       });
 
       if (response.ok) {
-        console.log('✅ Audio enviado exitosamente al bot');
+        const result = await response.json();
+        console.log('✅ Audio enviado exitosamente al bot:', result);
       } else {
         const error = await response.text();
-        console.error('❌ Error enviando audio al bot:', error);
+        console.error('❌ Error enviando audio al bot:', response.status, error);
       }
     } catch (error) {
       console.error('❌ Error en sendAudioToBot:', error.message);
@@ -113,8 +125,10 @@ wss.on('connection', function connection(ws, req) {
           const fullAudio = audioChunks.join('');
           console.log(`📦 Audio total: ${fullAudio.length} caracteres en base64`);
           
-          // Enviar al bot de Recall.ai
-          sendAudioToBot(fullAudio);
+          // Convertir y enviar al bot de Recall.ai
+          convertPCM16ToMP3(fullAudio).then(mp3Audio => {
+            sendAudioToBot(mp3Audio);
+          });
           
           // Limpiar chunks
           audioChunks = [];
@@ -228,7 +242,6 @@ wss.on('connection', function connection(ws, req) {
         .from('transcripts')
         .insert([
           {
-            bot_id: botId,
             speaker_id: speaker,
             speaker_name: speakerName,
             text: fullText,
