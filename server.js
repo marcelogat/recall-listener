@@ -1,4 +1,5 @@
-const WebSocket = require('ws');
+const ws = require('ws');
+const WebSocket = ws.WebSocket || ws;
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 
@@ -17,7 +18,7 @@ const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 
 const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
 
-const wss = new WebSocket.Server({ port: 8080 });
+const wss = new ws.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 console.log('🎤 Modo: OpenAI Realtime API (Audio directo)');
@@ -25,10 +26,13 @@ console.log('💡 ElevenLabs: EN HOLD (para comparar)\n');
 
 const SILENCE_TIMEOUT = 3000;
 
-const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos Aires, Argentina. 
-Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
+const ALEX_PROFILE = `Sos Alex, un project manager experto que vive en Buenos Aires, Argentina. 
+Tenés 32 años y amplia experiencia trabajando en empresas internacionales.
 Tu rol es asistir en reuniones cuando te mencionen por nombre.
-Responde de forma breve y concisa, como en una conversación normal de reunión.`;
+Respondé de forma breve y natural, usando modismos argentinos cuando sea apropiado.
+Hablá como un porteño: usá "vos" en lugar de "tú", conjugá los verbos en forma rioplatense.
+Ejemplos: "¿Cómo andás?", "Dale, dale", "Mirá", "Bueno, che", "Perfecto, dale".
+Mantené un tono profesional pero cercano, como en una charla de oficina en Buenos Aires.`;
 
 wss.on('connection', function connection(ws_client, req) {
   const clientIp = req.socket.remoteAddress;
@@ -47,40 +51,55 @@ wss.on('connection', function connection(ws_client, req) {
   // FUNCIÓN: Inicializar OpenAI Realtime API con AUDIO
   // =====================================================================================
   function initOpenAI() {
+    console.log('\n🔍 Verificando OPENAI_API_KEY...');
+    console.log('   Key presente:', !!OPENAI_API_KEY);
+    console.log('   Key length:', OPENAI_API_KEY ? OPENAI_API_KEY.length : 0);
+    
     if (!OPENAI_API_KEY) {
-      console.log('⚠️  OPENAI_API_KEY no configurada - OpenAI deshabilitado');
+      console.log('❌ OPENAI_API_KEY no configurada - OpenAI deshabilitado');
       return;
     }
 
     console.log('\n🤖 Iniciando sesión con OpenAI Realtime API (AUDIO)...');
+    console.log('   URL:', OPENAI_WS_URL);
     
-    openaiWs = new WebSocket(OPENAI_WS_URL, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1'
-      }
-    });
-
-    openaiWs.on('open', () => {
-      console.log('✅ Conectado a OpenAI Realtime API');
-      
-      const sessionConfig = {
-        type: 'session.update',
-        session: {
-          modalities: ['text', 'audio'],  // ← AUDIO HABILITADO
-          instructions: ALEX_PROFILE,
-          voice: 'alloy',
-          input_audio_format: 'pcm16',
-          output_audio_format: 'pcm16',
-          turn_detection: null,  // Desactivado, controlamos manualmente
-          temperature: 0.8
+    try {
+      openaiWs = new WebSocket(OPENAI_WS_URL, {
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'OpenAI-Beta': 'realtime=v1'
         }
-      };
-      
-      openaiWs.send(JSON.stringify(sessionConfig));
-      console.log('📋 Perfil de Alex configurado (con audio)');
-      openaiReady = true;
-    });
+      });
+
+      openaiWs.on('open', () => {
+        console.log('✅ Conectado a OpenAI Realtime API');
+        
+        const sessionConfig = {
+          type: 'session.update',
+          session: {
+            modalities: ['text', 'audio'],  // ← AUDIO HABILITADO
+            instructions: ALEX_PROFILE,
+            voice: 'shimmer',  // ← Voz más natural y cálida (opciones: alloy, echo, shimmer)
+            input_audio_format: 'pcm16',
+            output_audio_format: 'pcm16',
+            input_audio_transcription: {
+              model: 'whisper-1'
+            },
+            turn_detection: null,  // Desactivado, controlamos manualmente
+            temperature: 0.9,  // ← Más creatividad para sonar más natural
+            max_response_output_tokens: 150  // ← Respuestas cortas y concisas
+          }
+        };
+        
+        openaiWs.send(JSON.stringify(sessionConfig));
+        console.log('📋 Perfil de Alex configurado (con audio)');
+        openaiReady = true;
+      });
+    } catch (error) {
+      console.error('❌ Error creando WebSocket de OpenAI:', error.message);
+      console.error('   Stack:', error.stack);
+      return;
+    }
 
     // =====================================================================================
     // MANEJO DE MENSAJES DE OPENAI
@@ -129,10 +148,14 @@ wss.on('connection', function connection(ws_client, req) {
 
     openaiWs.on('error', (error) => {
       console.error('❌ Error en WebSocket de OpenAI:', error.message);
+      console.error('   Código:', error.code);
+      console.error('   Stack:', error.stack);
     });
 
-    openaiWs.on('close', () => {
+    openaiWs.on('close', (code, reason) => {
       console.log('🔌 Conexión con OpenAI cerrada');
+      console.log('   Código:', code);
+      console.log('   Razón:', reason ? reason.toString() : 'No especificada');
       openaiReady = false;
     });
   }
@@ -208,7 +231,7 @@ wss.on('connection', function connection(ws_client, req) {
         type: 'response.create',
         response: {
           modalities: ['text', 'audio'],  // ← Pedimos audio en la respuesta
-          instructions: 'Responde de forma breve y natural.'
+          instructions: 'Respondé de forma natural y breve, como en una charla de oficina. Usá el voseo argentino.'
         }
       };
 
