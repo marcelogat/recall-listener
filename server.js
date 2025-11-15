@@ -1,5 +1,11 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const fs = require('fs').promises;
+const path = require('path');
+
+const execAsync = promisify(exec);
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -33,10 +39,44 @@ wss.on('connection', function connection(ws, req) {
 
   // Función para convertir PCM16 a MP3 base64
   async function convertPCM16ToMP3(pcm16Base64) {
-    // Por ahora, OpenAI solo da audio en formato pcm16
-    // Necesitamos convertirlo a MP3
-    // Temporal: retornar el mismo audio (Recall.ai podría aceptar pcm16)
-    return pcm16Base64;
+    try {
+      console.log('🔄 Convirtiendo PCM16 a MP3...');
+      
+      // Crear archivos temporales
+      const tempDir = '/tmp';
+      const timestamp = Date.now();
+      const pcmFile = path.join(tempDir, `audio_${timestamp}.pcm`);
+      const mp3File = path.join(tempDir, `audio_${timestamp}.mp3`);
+
+      // Decodificar base64 y guardar como PCM
+      const pcmBuffer = Buffer.from(pcm16Base64, 'base64');
+      await fs.writeFile(pcmFile, pcmBuffer);
+
+      console.log(`📁 Archivo PCM guardado: ${pcmFile} (${pcmBuffer.length} bytes)`);
+
+      // Convertir PCM a MP3 usando ffmpeg
+      // OpenAI usa PCM16 a 24kHz mono
+      const ffmpegCmd = `ffmpeg -f s16le -ar 24000 -ac 1 -i ${pcmFile} -codec:a libmp3lame -b:a 128k ${mp3File}`;
+      
+      console.log(`🎬 Ejecutando: ${ffmpegCmd}`);
+      await execAsync(ffmpegCmd);
+
+      // Leer el MP3 y convertir a base64
+      const mp3Buffer = await fs.readFile(mp3File);
+      const mp3Base64 = mp3Buffer.toString('base64');
+
+      console.log(`✅ Conversión exitosa: ${mp3Base64.length} caracteres en base64`);
+
+      // Limpiar archivos temporales
+      await fs.unlink(pcmFile);
+      await fs.unlink(mp3File);
+
+      return mp3Base64;
+
+    } catch (error) {
+      console.error('❌ Error convirtiendo PCM16 a MP3:', error.message);
+      throw error;
+    }
   }
 
   // Función para enviar audio al bot de Recall.ai
@@ -65,7 +105,7 @@ wss.on('connection', function connection(ws, req) {
 
       if (response.ok) {
         const result = await response.json();
-        console.log('✅ Audio enviado exitosamente al bot:', result);
+        console.log('✅ Audio MP3 enviado exitosamente al bot');
       } else {
         const error = await response.text();
         console.error('❌ Error enviando audio al bot:', response.status, error);
@@ -123,12 +163,16 @@ wss.on('connection', function connection(ws, req) {
           
           // Combinar todos los chunks
           const fullAudio = audioChunks.join('');
-          console.log(`📦 Audio total: ${fullAudio.length} caracteres en base64`);
+          console.log(`📦 Audio PCM16 total: ${fullAudio.length} caracteres en base64`);
           
-          // Convertir y enviar al bot de Recall.ai
-          convertPCM16ToMP3(fullAudio).then(mp3Audio => {
-            sendAudioToBot(mp3Audio);
-          });
+          // Convertir PCM16 a MP3 y enviar al bot
+          convertPCM16ToMP3(fullAudio)
+            .then(mp3Audio => {
+              sendAudioToBot(mp3Audio);
+            })
+            .catch(err => {
+              console.error('❌ Error en conversión:', err);
+            });
           
           // Limpiar chunks
           audioChunks = [];
@@ -238,6 +282,8 @@ wss.on('connection', function connection(ws, req) {
         sendToOpenAI(fullText);
       }
 
+      // Comentado temporalmente hasta que arregles la estructura de Supabase
+      /*
       const { data, error } = await supabase
         .from('transcripts')
         .insert([
@@ -257,6 +303,7 @@ wss.on('connection', function connection(ws, req) {
       } else {
         console.log('✅ Transcript guardado en Supabase exitosamente');
       }
+      */
 
       currentUtterance = [];
 
