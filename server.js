@@ -1,7 +1,5 @@
-const ws = require('ws');
-const WebSocket = ws.WebSocket || ws;
+const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-const axios = require('axios');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -10,394 +8,306 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'JNcXxzrlvFDXcrGo2b47';
 
-// ========== ELEVENLABS EN HOLD - DESCOMENTÁ ESTO PARA USAR ELEVENLABS ==========
-// const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-// const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'JNcXxzrlvFDXcrGo2b47';
-// ================================================================================
-
-const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
-
-const wss = new ws.Server({ port: 8080 });
+const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
-console.log('🎤 Modo: OpenAI Realtime API (Audio directo)');
-console.log('💡 ElevenLabs: EN HOLD (para comparar)\n');
 
 const SILENCE_TIMEOUT = 3000;
 
-const ALEX_PROFILE = `Sos Alex, un project manager experto que vive en Buenos Aires, Argentina. 
-Tenés 32 años y amplia experiencia trabajando en empresas internacionales.
-Tu rol es asistir en reuniones cuando te mencionen por nombre.
-Respondé de forma breve y natural, usando modismos argentinos cuando sea apropiado.
-Hablá como un porteño: usá "vos" en lugar de "tú", conjugá los verbos en forma rioplatense.
-Ejemplos: "¿Cómo andás?", "Dale, dale", "Mirá", "Bueno, che", "Perfecto, dale".
-Mantené un tono profesional pero cercano, como en una charla de oficina en Buenos Aires.`;
+const ALEX_PROFILE = `Eres Alex, un project manager de 32 años de Buenos Aires con experiencia en empresas internacionales. Responde de forma amigable y profesional.`;
 
-wss.on('connection', function connection(ws_client, req) {
+wss.on('connection', function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
   let currentUtterance = [];
   let timeoutId = null;
   let lastSpeaker = null;
-  let openaiWs = null;
-  let openaiReady = false;
-  let audioChunks = [];
   let botId = null;
-  let conversationStartTime = null;
+  let conversationHistory = [];
 
-  // =====================================================================================
-  // FUNCIÓN: Inicializar OpenAI Realtime API con AUDIO
-  // =====================================================================================
-  function initOpenAI() {
-    console.log('\n🔍 Verificando OPENAI_API_KEY...');
-    console.log('   Key presente:', !!OPENAI_API_KEY);
-    console.log('   Key length:', OPENAI_API_KEY ? OPENAI_API_KEY.length : 0);
-    
-    if (!OPENAI_API_KEY) {
-      console.log('❌ OPENAI_API_KEY no configurada - OpenAI deshabilitado');
+  // Función OPTIMIZADA para generar audio con ElevenLabs (Turbo v2.5)
+  async function generateElevenLabsAudio(text) {
+    try {
+      console.log('🎙️ Generando audio con ElevenLabs Turbo...');
+      console.log(`📝 Texto: "${text}"`);
+
+      const startTime = Date.now();
+
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_turbo_v2_5', // ✅ MODELO TURBO (mucho más rápido)
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.8,
+            style: 0.0,
+            use_speaker_boost: true
+          },
+          optimize_streaming_latency: 4 // ✅ Máxima optimización de latencia
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
+      }
+
+      const audioBuffer = await response.arrayBuffer();
+      const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
+
+      const duration = Date.now() - startTime;
+      console.log(`✅ Audio generado en ${duration}ms: ${mp3Base64.length} caracteres`);
+      
+      return mp3Base64;
+
+    } catch (error) {
+      console.error('❌ Error generando audio con ElevenLabs:', error.message);
+      throw error;
+    }
+  }
+
+  // Función para enviar audio al bot de Recall.ai
+  async function sendAudioToBot(audioBase64) {
+    if (!botId) {
+      console.error('❌ No hay bot_id disponible para enviar audio');
       return;
     }
 
-    console.log('\n🤖 Iniciando sesión con OpenAI Realtime API (AUDIO)...');
-    console.log('   URL:', OPENAI_WS_URL);
-    
     try {
-      openaiWs = new WebSocket(OPENAI_WS_URL, {
+      console.log('🔊 Enviando audio al bot de Recall.ai...');
+      const startTime = Date.now();
+      
+      const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${RECALL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          kind: 'mp3',
+          b64_data: audioBase64
+        })
+      });
+
+      const duration = Date.now() - startTime;
+
+      if (response.ok) {
+        console.log(`✅ Audio enviado al bot en ${duration}ms`);
+      } else {
+        const error = await response.text();
+        console.error('❌ Error enviando audio al bot:', response.status, error);
+      }
+    } catch (error) {
+      console.error('❌ Error en sendAudioToBot:', error.message);
+    }
+  }
+
+  // Función OPTIMIZADA para obtener respuesta de GPT-4
+  async function getGPT4Response(userMessage) {
+    try {
+      console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
+      const startTime = Date.now();
+
+      conversationHistory.push({
+        role: 'user',
+        content: userMessage
+      });
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
         headers: {
           'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'OpenAI-Beta': 'realtime=v1'
-        }
-      });
-
-      openaiWs.on('open', () => {
-        console.log('✅ Conectado a OpenAI Realtime API');
-        
-        const sessionConfig = {
-          type: 'session.update',
-          session: {
-            modalities: ['text', 'audio'],  // ← AUDIO HABILITADO
-            instructions: ALEX_PROFILE,
-            voice: 'shimmer',  // ← Voz más natural y cálida (opciones: alloy, echo, shimmer)
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            input_audio_transcription: {
-              model: 'whisper-1'
-            },
-            turn_detection: null,  // Desactivado, controlamos manualmente
-            temperature: 0.9,  // ← Más creatividad para sonar más natural
-            max_response_output_tokens: 150  // ← Respuestas cortas y concisas
-          }
-        };
-        
-        openaiWs.send(JSON.stringify(sessionConfig));
-        console.log('📋 Perfil de Alex configurado (con audio)');
-        openaiReady = true;
-      });
-    } catch (error) {
-      console.error('❌ Error creando WebSocket de OpenAI:', error.message);
-      console.error('   Stack:', error.stack);
-      return;
-    }
-
-    // =====================================================================================
-    // MANEJO DE MENSAJES DE OPENAI
-    // =====================================================================================
-    openaiWs.on('message', (data) => {
-      try {
-        const event = JSON.parse(data.toString());
-        
-        // ============ CAPTURAR AUDIO ============
-        if (event.type === 'response.audio.delta') {
-          console.log('🎵 Chunk de audio recibido');
-          audioChunks.push(event.delta);
-        }
-
-        // ============ AUDIO COMPLETO ============
-        if (event.type === 'response.audio.done') {
-          const endTime = Date.now();
-          const totalTime = conversationStartTime ? endTime - conversationStartTime : 0;
-          
-          console.log(`✅ Audio completo recibido (${totalTime}ms desde inicio)`);
-          
-          const fullAudio = audioChunks.join('');
-          console.log(`📦 Audio total: ${fullAudio.length} caracteres en base64`);
-          
-          if (botId && fullAudio) {
-            sendAudioToRecall(fullAudio);
-          }
-          
-          audioChunks = [];
-        }
-
-        // ============ TEXTO DE RESPUESTA (para logging) ============
-        if (event.type === 'response.text.delta') {
-          console.log('💬 Texto:', event.delta);
-        }
-
-        // ============ ERROR HANDLING ============
-        if (event.type === 'error') {
-          console.error('❌ Error de OpenAI:', event.error);
-        }
-
-      } catch (e) {
-        console.error('❌ Error procesando mensaje de OpenAI:', e.message);
-      }
-    });
-
-    openaiWs.on('error', (error) => {
-      console.error('❌ Error en WebSocket de OpenAI:', error.message);
-      console.error('   Código:', error.code);
-      console.error('   Stack:', error.stack);
-    });
-
-    openaiWs.on('close', (code, reason) => {
-      console.log('🔌 Conexión con OpenAI cerrada');
-      console.log('   Código:', code);
-      console.log('   Razón:', reason ? reason.toString() : 'No especificada');
-      openaiReady = false;
-    });
-  }
-
-  // =====================================================================================
-  // FUNCIÓN: Enviar audio a Recall.ai
-  // =====================================================================================
-  async function sendAudioToRecall(audioBase64) {
-    if (!botId) {
-      console.log('⚠️  No hay bot_id, no se puede enviar audio');
-      return;
-    }
-
-    console.log(`📤 Enviando audio a Recall bot ${botId}...`);
-    
-    try {
-      const response = await axios.post(
-        `https://api.recall.ai/api/v1/bot/${botId}/send_audio`,
-        {
-          audio: audioBase64,
-          sample_rate: 24000
+          'Content-Type': 'application/json'
         },
-        {
-          headers: {
-            'Authorization': `Token ${RECALL_API_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      if (response.status === 200) {
-        console.log('✅ Audio enviado exitosamente a Recall.ai');
-      } else {
-        console.log(`⚠️  Respuesta inesperada de Recall.ai: ${response.status}`);
-      }
-    } catch (error) {
-      console.error('❌ Error enviando audio a Recall:', error.response?.data || error.message);
-    }
-  }
-
-  // =====================================================================================
-  // FUNCIÓN: Enviar texto a Alex (OpenAI) y recibir AUDIO de respuesta
-  // =====================================================================================
-  async function sendToAlex(text) {
-    if (!openaiReady || !openaiWs) {
-      console.log('⚠️  OpenAI no está listo');
-      return;
-    }
-
-    conversationStartTime = Date.now();
-    console.log(`\n⏱️  [${conversationStartTime}] Enviando a Alex: "${text}"`);
-
-    try {
-      audioChunks = [];
-      
-      const message = {
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
             {
-              type: 'input_text',
-              text: text
-            }
-          ]
-        }
-      };
+              role: 'system',
+              content: ALEX_PROFILE
+            },
+            ...conversationHistory
+          ],
+          temperature: 0.7,
+          max_tokens: 150, // ✅ Reducido para respuestas más cortas y rápidas
+          top_p: 1,
+          frequency_penalty: 0,
+          presence_penalty: 0
+        })
+      });
 
-      openaiWs.send(JSON.stringify(message));
-      
-      const createResponse = {
-        type: 'response.create',
-        response: {
-          modalities: ['text', 'audio'],  // ← Pedimos audio en la respuesta
-          instructions: 'Respondé de forma natural y breve, como en una charla de oficina. Usá el voseo argentino.'
-        }
-      };
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`OpenAI error: ${response.status} - ${error}`);
+      }
 
-      openaiWs.send(JSON.stringify(createResponse));
+      const data = await response.json();
+      const assistantMessage = data.choices[0].message.content;
+
+      conversationHistory.push({
+        role: 'assistant',
+        content: assistantMessage
+      });
+
+      if (conversationHistory.length > 10) {
+        conversationHistory = conversationHistory.slice(-10);
+      }
+
+      const duration = Date.now() - startTime;
+      console.log(`🎯 Respuesta de GPT-4 en ${duration}ms:`, assistantMessage);
       
-      console.log('📤 Mensaje enviado a OpenAI (esperando audio)...');
+      return assistantMessage;
 
     } catch (error) {
-      console.error('❌ Error enviando a OpenAI:', error.message);
+      console.error('❌ Error obteniendo respuesta de GPT-4:', error.message);
+      throw error;
     }
   }
 
-  // =====================================================================================
-  // FUNCIÓN: Procesar transcript completo (al detectar silencio)
-  // =====================================================================================
+  function detectAlexMention(text) {
+    const lowerText = text.toLowerCase();
+    return lowerText.includes('alex');
+  }
+
+  async function sendToAlex(text) {
+    try {
+      console.log('\n📤 Procesando mensaje para Alex:', text);
+      const totalStartTime = Date.now();
+
+      // ✅ OPTIMIZACIÓN: Ejecutar en secuencia pero con tracking de tiempo
+      const responseText = await getGPT4Response(text);
+      const audioBase64 = await generateElevenLabsAudio(responseText);
+      await sendAudioToBot(audioBase64);
+
+      const totalDuration = Date.now() - totalStartTime;
+      console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
+
+    } catch (error) {
+      console.error('❌ Error en sendToAlex:', error.message);
+    }
+  }
+
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0) return;
 
     try {
       const fullText = currentUtterance.map(word => word.text).join(' ');
-      const speaker = currentUtterance[0].speakerName || 'Desconocido';
+      const speaker = currentUtterance[0].speaker;
+      const speakerName = currentUtterance[0].speakerName;
       const startTime = currentUtterance[0].start_time;
       const endTime = currentUtterance[currentUtterance.length - 1].end_time;
 
-      console.log(`\n💬 Utterance completa de ${speaker}:`);
-      console.log(`   "${fullText}"`);
-      console.log(`   Duración: ${startTime}s - ${endTime}s`);
+      console.log('\n💾 PROCESANDO TRANSCRIPT COMPLETO:');
+      console.log(`   👤 Speaker: ${speakerName} (${speaker})`);
+      console.log(`   📝 Texto: "${fullText}"`);
+      console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
+      console.log(`   📊 Palabras: ${currentUtterance.length}`);
 
-      // Guardar en Supabase
-      try {
-        const { data, error } = await supabase
-          .from('transcripts')
-          .insert([{
-            speaker: speaker,
-            text: fullText,
-            start_time: startTime,
-            end_time: endTime,
-            word_count: currentUtterance.length,
-            created_at: new Date().toISOString()
-          }]);
-
-        if (error) {
-          console.error('❌ Error guardando en Supabase:', error.message);
-        } else {
-          console.log('✅ Guardado en Supabase exitosamente');
-        }
-      } catch (dbError) {
-        console.error('❌ Error de base de datos:', dbError.message);
-      }
-
-      // ============ DETECCIÓN DE "ALEX" ============
-      const lowerText = fullText.toLowerCase();
-      if (lowerText.includes('alex')) {
-        console.log('\n🎯 ¡Palabra clave "ALEX" detectada!');
+      if (detectAlexMention(fullText)) {
+        console.log('🔔 ¡Alex fue mencionado! Procesando respuesta...');
         await sendToAlex(fullText);
       }
 
       currentUtterance = [];
 
     } catch (error) {
-      console.error('❌ Error procesando utterance:', error.message);
+      console.error('❌ Error en processCompleteUtterance:', error.message);
     }
   }
 
-  // =====================================================================================
-  // MANEJO DE MENSAJES DE RECALL.AI
-  // =====================================================================================
-  ws_client.on('message', async function incoming(message) {
+  ws.on('message', function incoming(message) {
     try {
       const data = JSON.parse(message);
-
-      // ============ CAPTURAR BOT_ID ============
-      if (data.event === 'bot.status_change') {
-        if (!botId && data.data?.id) {
-          botId = data.data.id;
-          console.log(`\n🤖 Bot ID capturado: ${botId}`);
-          initOpenAI();
-        }
-      }
-
-      // ============ PROCESAR TRANSCRIPTS ============
+      
       if (data.event === 'transcript.data') {
-        if (!data.data?.data?.words) {
-          return;
+        const words = data.data?.data?.words;
+        const participant = data.data?.data?.participant;
+        
+        if (!botId && data.data?.bot?.id) {
+          botId = data.data.bot.id;
+          console.log(`🤖 Bot ID capturado: ${botId}`);
         }
 
-        const words = data.data.data.words;
-        const speakerId = data.data.speaker_id || 'unknown';
-        const speakerName = data.data.speaker || 'Speaker';
+        if (words && words.length > 0 && participant) {
+          console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
 
-        console.log(`\n📝 Transcript de ${speakerName}:`);
-        console.log(`   ${words.length} palabras nuevas`);
+          const speakerId = participant.id;
+          const speakerName = participant.name || `Speaker ${speakerId}`;
 
-        if (lastSpeaker && lastSpeaker !== speakerId && currentUtterance.length > 0) {
-          console.log('🔄 Cambio de speaker detectado');
-          await processCompleteUtterance();
-        }
-
-        words.forEach(word => {
-          const text = word.text || '';
-          if (text.trim()) {
-            currentUtterance.push({
-              text: text,
-              speaker: speakerId,
-              speakerName: speakerName,
-              start_time: word.start_timestamp?.relative || 0,
-              end_time: word.end_timestamp?.relative || 0
-            });
+          if (lastSpeaker !== null && lastSpeaker !== speakerId) {
+            console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
+            processCompleteUtterance();
           }
-        });
 
-        lastSpeaker = speakerId;
+          words.forEach(word => {
+            const text = word.text || '';
+            if (text.trim()) {
+              currentUtterance.push({
+                text: text,
+                speaker: speakerId,
+                speakerName: speakerName,
+                start_time: word.start_timestamp?.relative || 0,
+                end_time: word.end_timestamp?.relative || 0
+              });
+            }
+          });
 
-        if (timeoutId) {
-          clearTimeout(timeoutId);
+          lastSpeaker = speakerId;
+
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+
+          timeoutId = setTimeout(() => {
+            processCompleteUtterance();
+          }, SILENCE_TIMEOUT);
+
+          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
         }
-
-        timeoutId = setTimeout(() => {
-          processCompleteUtterance();
-        }, SILENCE_TIMEOUT);
-
-        console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+      } else if (data.event === 'transcript.partial_data') {
+        console.log('   ⏭️  Ignorando partial_data');
       }
-
+      
     } catch (e) {
       console.error('❌ Error procesando mensaje:', e.message);
     }
   });
 
-  // =====================================================================================
-  // CLEANUP AL CERRAR CONEXIÓN
-  // =====================================================================================
-  ws_client.on('close', async function close(code, reason) {
+  ws.on('close', async function close(code, reason) {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
     console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
     
     if (currentUtterance.length > 0) {
-      console.log('💾 Procesando transcript pendiente...');
       await processCompleteUtterance();
     }
     
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
-
-    if (openaiWs) {
-      try {
-        openaiWs.close();
-        console.log('🤖 Conexión con OpenAI cerrada');
-      } catch (e) {
-        console.error('❌ Error cerrando OpenAI:', e.message);
-      }
-    }
   });
 
-  ws_client.on('error', function error(err) {
+  ws.on('error', function error(err) {
     console.error('❌ Error en WebSocket:', err.message);
   });
 
   const pingInterval = setInterval(() => {
-    if (ws_client.readyState === 1) {
-      ws_client.ping();
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
     }
   }, 30000);
 
-  ws_client.on('close', () => {
+  ws.on('close', () => {
     clearInterval(pingInterval);
   });
 });
@@ -411,86 +321,3 @@ process.on('unhandledRejection', (reason) => {
 });
 
 console.log('\n📡 Esperando conexiones de Recall.ai...\n');
-
-
-// =====================================================================================
-// =====================================================================================
-//
-//  📝 CÓDIGO DE ELEVENLABS EN HOLD (COMENTADO)
-//
-//  Para volver a usar ElevenLabs en lugar de OpenAI audio:
-//  1. Descomentá las constantes de ElevenLabs al inicio
-//  2. Reemplazá la función sendToAlex con esta versión:
-//
-// =====================================================================================
-// =====================================================================================
-
-/*
-async function sendToAlex(text) {
-  try {
-    console.log(`\n⏱️  Enviando a Alex: "${text}"`);
-    const startTime = Date.now();
-
-    // 1. GPT-4o-mini para texto
-    const gptResponse = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: ALEX_PROFILE },
-          { role: 'user', content: text }
-        ],
-        max_tokens: 100,
-        temperature: 0.8
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const responseText = gptResponse.data.choices[0].message.content;
-    const gptTime = Date.now() - startTime;
-    console.log(`✅ GPT-4o-mini respondió (${gptTime}ms): "${responseText}"`);
-
-    // 2. ElevenLabs streaming TTS
-    const ttsStartTime = Date.now();
-    const ttsResponse = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
-      {
-        text: responseText,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75
-        }
-      },
-      {
-        headers: {
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        responseType: 'arraybuffer'
-      }
-    );
-
-    const audioBuffer = Buffer.from(ttsResponse.data);
-    const audioBase64 = audioBuffer.toString('base64');
-    const ttsTime = Date.now() - ttsStartTime;
-    console.log(`✅ ElevenLabs TTS completado (${ttsTime}ms)`);
-
-    // 3. Enviar a Recall.ai
-    if (botId) {
-      await sendAudioToRecall(audioBase64);
-    }
-
-    const totalTime = Date.now() - startTime;
-    console.log(`⏱️  Tiempo total: ${totalTime}ms (GPT: ${gptTime}ms + TTS: ${ttsTime}ms)`);
-
-  } catch (error) {
-    console.error('❌ Error en sendToAlex:', error.response?.data || error.message);
-  }
-}
-*/
