@@ -1,6 +1,5 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
-const fetch = require('node-fetch');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
