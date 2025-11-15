@@ -1,4 +1,5 @@
-const WebSocket = require('ws');
+const ws = require('ws');
+const WebSocket = ws.WebSocket || ws;
 const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -8,7 +9,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01';
 
-const wss = new WebSocket.Server({ port: 8080 });
+const wss = new ws.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
@@ -19,7 +20,7 @@ const ALEX_PROFILE = `Eres Alex, un project manager experto que vive en Buenos A
 Tienes 32 años y amplia experiencia trabajando en empresas internacionales.
 Tu rol es asistir en reuniones cuando te mencionen por nombre.`;
 
-wss.on('connection', function connection(ws, req) {
+wss.on('connection', function connection(ws_client, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
@@ -126,7 +127,7 @@ wss.on('connection', function connection(ws, req) {
       if (fullText.toLowerCase().includes('alex')) {
         console.log('\n🔔 ¡ALEX FUE MENCIONADO!');
         
-        if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+        if (openaiReady && openaiWs && openaiWs.readyState === 1) {
           try {
             const conversationItem = {
               type: 'conversation.item.create',
@@ -186,7 +187,7 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  ws.on('message', async function incoming(message) {
+  ws_client.on('message', async function incoming(message) {
     try {
       let data;
       try {
@@ -257,7 +258,7 @@ wss.on('connection', function connection(ws, req) {
     }
   });
 
-  ws.on('close', async function close(code, reason) {
+  ws_client.on('close', async function close(code, reason) {
     console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
     console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
     
@@ -280,17 +281,17 @@ wss.on('connection', function connection(ws, req) {
     }
   });
 
-  ws.on('error', function error(err) {
+  ws_client.on('error', function error(err) {
     console.error('❌ Error en WebSocket:', err.message);
   });
 
   const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
+    if (ws_client.readyState === 1) {
+      ws_client.ping();
     }
   }, 30000);
 
-  ws.on('close', () => {
+  ws_client.on('close', () => {
     clearInterval(pingInterval);
   });
 });
@@ -304,10 +305,3 @@ process.on('unhandledRejection', (reason) => {
 });
 
 console.log('\n📡 Esperando conexiones de Recall.ai...\n');
-```
-
-**Agrega en tu `.env`:**
-```
-SUPABASE_URL=tu_supabase_url
-SUPABASE_ANON_KEY=tu_supabase_key
-OPENAI_API_KEY=sk-proj-tu-clave-de-openai
