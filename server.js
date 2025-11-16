@@ -15,7 +15,9 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-const SILENCE_TIMEOUT = 0;
+// ✅ TIMEOUTS AJUSTABLES
+const SILENCE_TIMEOUT_SINGLE_SPEAKER = 2000; // 2 segundos cuando hay solo 1 persona
+const SILENCE_TIMEOUT_MULTIPLE_SPEAKERS = 0; // Inmediato cuando hay múltiples personas
 
 const ALEX_PROFILE = `Sos Alex, un Project Manager de 32 años de Buenos Aires, Argentina. 
 
@@ -47,7 +49,7 @@ ESTILO DE COMUNICACIÓN PARA AUDIO:
 - Mantenés un equilibrio entre profesional y amigable. No sos formal en exceso, pero tampoco demasiado casual.
 - Hablás con ritmo natural. Hacés pausas donde corresponde.
 - Evitás siglas complicadas. Decís las cosas completas cuando es necesario.
-- Cuando sepas el nombre de quien te habla, usalo ocasionalmente de forma natural para personalizar la conversación.
+- Cuando sepas el nombre de quien te habla, usalo OCASIONALMENTE de forma natural para personalizar la conversación. No uses el nombre en cada respuesta, solo cuando sume valor o cercanía a la conversación.
 
 EXPERTISE EN METODOLOGÍAS:
 - Dominás Scrum, Kanban, y metodologías híbridas. Adaptás la metodología al contexto del equipo.
@@ -121,6 +123,10 @@ wss.on('connection', function connection(ws, req) {
   let lastSpeaker = null;
   let botId = null;
   let conversationHistory = [];
+  
+  // ✅ NUEVOS CONTROLES
+  let uniqueSpeakers = new Set(); // Track de speakers únicos
+  let isAlexSpeaking = false; // Control para evitar que Alex hable mientras habla
 
   // Función OPTIMIZADA para generar audio con ElevenLabs (Turbo v2.5)
   async function generateElevenLabsAudio(text) {
@@ -206,13 +212,13 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // ✅ FUNCIÓN MEJORADA: Obtiene respuesta de GPT-4 con información del speaker
+  // Función para obtener respuesta de GPT-4 con información del speaker
   async function getGPT4Response(userMessage, speakerName) {
     try {
       console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
       const startTime = Date.now();
 
-      // ✅ Agregar el nombre del speaker al mensaje
+      // Agregar el nombre del speaker al mensaje
       const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
 
       conversationHistory.push({
@@ -256,7 +262,6 @@ wss.on('connection', function connection(ws, req) {
         content: assistantMessage
       });
 
-      // ✅ CAMBIO: Contexto ampliado de 10 a 25 mensajes
       if (conversationHistory.length > 25) {
         conversationHistory = conversationHistory.slice(-25);
       }
@@ -270,6 +275,25 @@ wss.on('connection', function connection(ws, req) {
       console.error('❌ Error obteniendo respuesta de GPT-4:', error.message);
       throw error;
     }
+  }
+
+  // ✅ NUEVA FUNCIÓN: Detecta si debe responder según el número de speakers
+  function shouldAlexRespond(text) {
+    const speakerCount = uniqueSpeakers.size;
+    
+    // Modo 1: Solo 1 speaker (conversación 1-a-1 con Alex)
+    if (speakerCount === 1) {
+      console.log('💬 Modo conversación 1-a-1: Alex responde automáticamente');
+      return true;
+    }
+    
+    // Modo 2: Múltiples speakers (reunión grupal)
+    if (speakerCount > 1) {
+      console.log('👥 Modo reunión grupal: Verificando triggers...');
+      return detectAlexMentionOrQuestion(text);
+    }
+    
+    return false;
   }
 
   // Detecta mención de Alex O preguntas
@@ -290,12 +314,10 @@ wss.on('connection', function connection(ws, req) {
     ];
     
     const hasQuestionWord = questionWords.some(word => {
-      // Buscar la palabra al inicio o precedida por espacio
       const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
       return regex.test(lowerText);
     });
     
-    // Detectar signos de interrogación
     const hasQuestionMark = text.includes('?');
     
     if (hasQuestionWord || hasQuestionMark) {
@@ -306,9 +328,16 @@ wss.on('connection', function connection(ws, req) {
     return false;
   }
 
-  // ✅ FUNCIÓN MEJORADA: Ahora recibe también el nombre del speaker
   async function sendToAlex(text, speakerName) {
+    // ✅ CONTROL: No permitir que Alex hable si ya está hablando
+    if (isAlexSpeaking) {
+      console.log('⏸️  Alex ya está hablando, ignorando solicitud');
+      return;
+    }
+
     try {
+      isAlexSpeaking = true; // ✅ Marcar que Alex está hablando
+      
       console.log('\n📤 Procesando mensaje para Alex');
       console.log(`   👤 De: ${speakerName}`);
       console.log(`   💬 Mensaje: ${text}`);
@@ -323,6 +352,12 @@ wss.on('connection', function connection(ws, req) {
 
     } catch (error) {
       console.error('❌ Error en sendToAlex:', error.message);
+    } finally {
+      // ✅ Liberar el control después de un delay para que el audio termine
+      setTimeout(() => {
+        isAlexSpeaking = false;
+        console.log('✅ Alex terminó de hablar');
+      }, 1000); // 1 segundo de buffer
     }
   }
 
@@ -341,11 +376,14 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   📝 Texto: "${fullText}"`);
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${currentUtterance.length}`);
+      console.log(`   👥 Total speakers en reunión: ${uniqueSpeakers.size}`);
 
-      // ✅ CAMBIO: Ahora pasamos también el nombre del speaker
-      if (detectAlexMentionOrQuestion(fullText)) {
+      // ✅ LÓGICA MEJORADA: Decidir si Alex debe responder
+      if (shouldAlexRespond(fullText)) {
         console.log('🎯 ¡Trigger activado! Procesando respuesta...');
         await sendToAlex(fullText, speakerName);
+      } else {
+        console.log('⏭️  No se detectó trigger, continuando...');
       }
 
       currentUtterance = [];
@@ -373,6 +411,9 @@ wss.on('connection', function connection(ws, req) {
 
           const speakerId = participant.id;
           const speakerName = participant.name || `Speaker ${speakerId}`;
+          
+          // ✅ Agregar speaker al set de speakers únicos
+          uniqueSpeakers.add(speakerId);
 
           if (lastSpeaker !== null && lastSpeaker !== speakerId) {
             console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
@@ -398,11 +439,17 @@ wss.on('connection', function connection(ws, req) {
             clearTimeout(timeoutId);
           }
 
+          // ✅ TIMEOUT DINÁMICO según número de speakers
+          const timeout = uniqueSpeakers.size === 1 
+            ? SILENCE_TIMEOUT_SINGLE_SPEAKER 
+            : SILENCE_TIMEOUT_MULTIPLE_SPEAKERS;
+
           timeoutId = setTimeout(() => {
             processCompleteUtterance();
-          }, SILENCE_TIMEOUT);
+          }, timeout);
 
           console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+          console.log(`   Timeout aplicado: ${timeout}ms`);
         }
       } else if (data.event === 'transcript.partial_data') {
         console.log('   ⏭️  Ignorando partial_data');
