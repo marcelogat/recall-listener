@@ -397,6 +397,16 @@ wss.on('connection', async function connection(ws, req) {
       return true;
     }
     
+    // ✅ NUEVO: Detectar "si" condicional al inicio (preguntas indirectas)
+    // "si Day of Flow puede...", "si es posible..."
+    if (agent.language.startsWith('es')) {
+      const siConditionalPattern = /\b(si|s)\s+\w+\s+(puede|pueden|es|son|esta|hay|tiene|funciona)/;
+      if (siConditionalPattern.test(normalizedText)) {
+        console.log('   → Pregunta condicional con "si" detectada');
+        return true;
+      }
+    }
+    
     // Detectar palabras interrogativas
     let questionWords = [];
     
@@ -404,8 +414,7 @@ wss.on('connection', async function connection(ws, req) {
       questionWords = [
         'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
         'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
-        'porque', 'cuál', 'cual', 'cuáles', 'cuales',
-        'si' // ✅ Agregado: para preguntas con "si"
+        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
       ];
     } else if (agent.language.startsWith('en')) {
       questionWords = [
