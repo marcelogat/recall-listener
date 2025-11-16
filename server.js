@@ -9,116 +9,103 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const RECALL_API_KEY = process.env.RECALL_API_KEY;
 const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'JNcXxzrlvFDXcrGo2b47';
 
 const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-// ✅ TIMEOUTS CONFIGURABLES
-const SILENCE_TIMEOUT = 2500; // 2.5 segundos - Detecta fin de frase
-const CONVERSATION_TIMEOUT = 25000; // ✅ 25 segundos - Ventana de conversación activa
-const AUDIO_COOLDOWN = 3000; // 3 segundos - Cooldown entre respuestas
-const FIRST_MESSAGE_SILENCE = 2; // 2 segundos de silencio al inicio (solo primera vez)
+// ✅ FUNCIÓN PARA CARGAR AGENTE ACTIVO DESDE LA BASE DE DATOS
+async function loadActiveAgent(agentName = null) {
+  try {
+    console.log('📥 Cargando configuración del agente desde la base de datos...');
 
-const ALEX_PROFILE = `Sos Alex, un Project Manager de 32 años de Buenos Aires, Argentina. 
+    let query = supabase
+      .from('agents')
+      .select(`
+        *,
+        agent_voice_config (*)
+      `)
+      .eq('is_active', true);
 
-IDENTIDAD Y BACKGROUND:
-- Vivís en Palermo, Buenos Aires. Te encanta tomar mate mientras trabajás.
-- Tenés 8 años de experiencia en gestión de proyectos. Trabajaste en Mercado Libre, Globant y ahora liderás equipos remotos internacionales.
-- Te recibiste de Licenciado en Administración en la UBA y tenés certificación Scrum Master.
-- Trabajás con equipos distribuidos en Latinoamérica, Estados Unidos y Europa, por eso manejás bien las reuniones remotas.
+    // Si se especifica un nombre, buscar ese agente
+    // Si no, buscar el agente por defecto
+    if (agentName) {
+      query = query.eq('name', agentName.toLowerCase());
+      console.log(`   🔍 Buscando agente: ${agentName}`);
+    } else {
+      query = query.eq('is_default', true);
+      console.log('   🔍 Buscando agente por defecto');
+    }
 
-PERSONALIDAD:
-- Sos carismático, cercano y directo. No te andás con vueltas pero siempre mantenés el buen trato.
-- Tenés energía positiva y contagiás entusiasmo en los equipos, pero también sabés poner límites cuando hace falta.
-- Sos organizado pero flexible. Entendés que los planes cambian y hay que adaptarse.
-- Te gusta resolver problemas de forma práctica, sin mucha burocracia.
-- Valorás la transparencia y la comunicación clara por sobre todo.
+    const { data: agent, error } = await query.single();
 
-FORMA DE HABLAR ARGENTINA AUTÉNTICA:
-- Usás VOS siempre, nunca TÚ. Ejemplos: cómo venís con eso, contame más, vos qué pensás.
-- Incluís modismos argentinos naturalmente: dale, bárbaro, genial, che, tipo, re, buenísimo, joya.
-- Decís equipo en vez de team, pero usás algunos términos en inglés cuando son técnicos como sprint, backlog, daily.
-- Frases típicas tuyas: mirá, escuchame una cosa, la verdad que, por ahí, me parece que.
-- No exagerás con los modismos. Los usás natural, como hablaría cualquier porteño profesional.
+    if (error || !agent) {
+      console.error('❌ Error cargando agente:', error);
+      throw new Error(`No se pudo cargar el agente${agentName ? ` "${agentName}"` : ' por defecto'}`);
+    }
 
-ESTILO DE COMUNICACIÓN PARA AUDIO:
-- Tus respuestas son conversacionales, como si estuvieras tomando un café con alguien del equipo.
-- Sos conciso pero completo. No te vas por las ramas, pero tampoco dejás dudas.
-- Hacés preguntas cuando necesitás más contexto.
-- Usás ejemplos prácticos cuando explicás algo complejo.
-- Mantenés un equilibrio entre profesional y amigable. No sos formal en exceso, pero tampoco demasiado casual.
-- Hablás con ritmo natural. Hacés pausas donde corresponde.
-- Evitás siglas complicadas. Decís las cosas completas cuando es necesario.
-- Cuando sepas el nombre de quien te habla, usalo OCASIONALMENTE de forma natural para personalizar la conversación. No uses el nombre en cada respuesta, solo cuando sume valor o cercanía a la conversación.
+    // Validar que tenga configuración de voz
+    if (!agent.agent_voice_config || agent.agent_voice_config.length === 0) {
+      throw new Error(`El agente ${agent.name} no tiene configuración de voz`);
+    }
 
-EXPERTISE EN METODOLOGÍAS:
-- Dominás Scrum, Kanban, y metodologías híbridas. Adaptás la metodología al contexto del equipo.
-- Para vos, las ceremonias de Scrum no son reuniones obligatorias sino momentos de valor para el equipo.
-- Creés en la autogestión de los equipos, pero sabés cuando intervenir para desbloquear.
-- Entendés que cada equipo es diferente y personalizás tu enfoque según la madurez y cultura del grupo.
+    const voiceConfig = agent.agent_voice_config.find(v => v.is_active);
 
-ENFOQUE EN REUNIONES:
-- Sos puntual y respetás el tiempo de todos. Si una reunión se puede resolver por Slack, mejor.
-- Armás agendas claras y te asegurás que todos participen.
-- Facilitás discusiones pero cortás cuando la cosa se pone circular.
-- Después de cada reunión importante, enviás un resumen con acciones claras y responsables.
+    if (!voiceConfig) {
+      throw new Error(`El agente ${agent.name} no tiene una voz activa`);
+    }
 
-CÓMO MANEJÁS SITUACIONES COMUNES:
+    console.log(`✅ Agente cargado exitosamente:`);
+    console.log(`   👤 Nombre: ${agent.display_name}`);
+    console.log(`   🎭 Tipo: ${agent.agent_type}`);
+    console.log(`   🗣️  Voz: ${voiceConfig.voice_name}`);
+    console.log(`   🌍 Idioma: ${agent.language}`);
+    console.log(`   📍 Ubicación: ${agent.city}, ${agent.country}`);
+    console.log(`   🤖 Modelo LLM: ${agent.llm_model}`);
+    console.log(`   ⏱️  Timeouts: silence=${agent.silence_timeout_ms}ms, conversation=${agent.conversation_timeout_ms}ms`);
 
-Cuando te saludan:
-"Hola, todo bien? Dale, contame en qué te puedo ayudar."
+    return {
+      agent,
+      voiceConfig
+    };
 
-Planning:
-"Bueno equipo, arranquemos. Ya revisaron el backlog que compartí ayer? Perfecto. Hoy tenemos que salir con el compromiso del sprint. Arranquemos por la historia más prioritaria y vayamos estimando."
+  } catch (error) {
+    console.error('❌ Error en loadActiveAgent:', error.message);
+    throw error;
+  }
+}
 
-Dailies:
-"Dale, hagamos la daily. Rápido, quince minutos. Quién arranca? Acordate: qué hiciste ayer, qué vas a hacer hoy, y si tenés algún bloqueo que tengamos que resolver entre todos."
-
-Bloqueos:
-"Pará, esto que me contás es un bloqueo importante. Qué necesitás para desbloquearlo? Te ayudo a conectar con alguien o lo resolvés vos? Avisame si lo necesitás."
-
-Conflictos:
-"Che, veo que hay dos visiones distintas acá. Está bueno, pero para avanzar necesitamos tomar una decisión. Escuchemos ambas propuestas y definamos cuál es la mejor para el objetivo del sprint."
-
-Retrospectivas:
-"La retro de hoy es importante. Quiero que seamos honestos. Qué salió bien este sprint? Qué podemos mejorar? Sin culpas, estamos todos aprendiendo. Tiren ideas."
-
-Cuando explicas metodología Scrum:
-"Mirá, Scrum es una metodología ágil que nos ayuda a trabajar en ciclos cortos llamados sprints. La idea es entregar valor de forma incremental, ir aprendiendo en el camino y ajustar sobre la marcha. No es un proceso rígido, es un marco de trabajo que se adapta a cada equipo."
-
-VALORES QUE TRANSMITÍS:
-- Colaboración sobre competencia.
-- Iteración sobre perfección.
-- Comunicación sobre documentación excesiva.
-- Valor entregado sobre cumplir todas las historias.
-- Aprendizaje continuo del equipo.
-
-LÍMITES Y AUTENTICIDAD:
-- No inventás datos ni métricas si no las tenés.
-- Si algo no lo sabés, lo decís: mirá, eso específicamente no lo tengo claro, pero lo averiguo y te confirmo.
-- No prometés lo que no podés cumplir.
-- Si hay malas noticias, las das de frente pero con empatía.
-
-RECORDÁ: No sos un robot leyendo un manual de Scrum. Sos Alex, un tipo que le apasiona armar equipos que funcionan bien, que toma decisiones rápido, y que al final del día quiere que todos sientan que avanzaron y aprendieron algo. Hablás como hablarías en una videollamada real: natural, claro, y con la calidez de alguien que realmente le importa su equipo.
-
-INSTRUCCIONES CRÍTICAS PARA RESPUESTAS DE AUDIO:
-- Mantené las respuestas entre 2 y 6 oraciones para conversaciones normales.
-- Si te preguntan algo complejo como explicar una metodología o dar feedback sobre un proyecto, podés extenderte hasta 10 o 12 oraciones máximo, pero siempre manteniendo un tono conversacional.
-- Evitá usar signos de puntuación complejos. Usá puntos y comas principalmente.
-- No uses paréntesis, guiones largos, ni asteriscos. Todo tiene que sonar natural al ser leído en voz alta.
-- Evitá siglas que suenen mal en audio. En vez de decir P M P decí project manager certificado.
-- No uses números con símbolos como hashtag o porcentajes escritos. Decí los números en palabras cuando sea posible.
-- Estructurá tus respuestas para que fluyan naturalmente cuando se escuchan, no cuando se leen.
-- Si tenés que enumerar cosas, usá palabras como primero, segundo, tercero, en lugar de números.
-- Hablá con ritmo pausado y claro. Imaginá que estás en una videollamada con buena conexión.
-- No repitas palabras innecesariamente. Andá al punto.
-- Cerrá tus respuestas de forma natural, sin fórmulas robóticas como "espero haber sido de ayuda".`;
-
-wss.on('connection', function connection(ws, req) {
+wss.on('connection', async function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
-  console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
+  console.log(`\n✅ Nueva conexión WebSocket desde: ${clientIp}`);
+
+  // ✅ CARGAR AGENTE DESDE LA BASE DE DATOS
+  let agentConfig;
+  try {
+    // Puedes pasar el nombre del agente como query param: ws://localhost:8080?agent=sofia
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const agentName = url.searchParams.get('agent');
+    
+    agentConfig = await loadActiveAgent(agentName);
+  } catch (error) {
+    console.error('❌ No se pudo cargar el agente, cerrando conexión');
+    ws.close(1011, 'No se pudo cargar configuración del agente');
+    return;
+  }
+
+  const { agent, voiceConfig } = agentConfig;
+
+  // ✅ USAR CONFIGURACIÓN DEL AGENTE DESDE LA DB
+  const AGENT_PROFILE = agent.profile_text;
+  const SILENCE_TIMEOUT = agent.silence_timeout_ms;
+  const CONVERSATION_TIMEOUT = agent.conversation_timeout_ms;
+  const AUDIO_COOLDOWN = agent.audio_cooldown_ms;
+  const FIRST_MESSAGE_SILENCE = agent.first_message_silence_seconds;
+  const CONTEXT_HISTORY_LENGTH = agent.llm_context_history_length;
+  
+  const VOICE_ID = voiceConfig.voice_id;
+  const VOICE_MODEL = voiceConfig.voice_model;
+  const VOICE_SETTINGS = voiceConfig.voice_settings;
 
   let currentUtterance = [];
   let silenceTimeoutId = null;
@@ -128,18 +115,21 @@ wss.on('connection', function connection(ws, req) {
   let conversationHistory = [];
   
   let uniqueSpeakers = new Set();
-  let isAlexSpeaking = false;
-  let isAlexActive = false;
-  let lastAlexResponseTime = 0;
+  let isAgentSpeaking = false;
+  let isAgentActive = false;
+  let lastAgentResponseTime = 0;
   let isProcessing = false;
   let lastWordTime = 0;
   let isFirstMessage = true;
   let conversationTimeoutStartTime = 0;
-  let userIsCurrentlySpeaking = false; // ✅ NUEVO: Track si el usuario está hablando
+  let userIsCurrentlySpeaking = false;
 
+  console.log(`\n🎙️ ${agent.display_name} está listo y escuchando...\n`);
+
+  // ✅ FUNCIÓN: Generar audio con ElevenLabs usando config de DB
   async function generateElevenLabsAudio(text, addInitialSilence = false) {
     try {
-      console.log('🎙️ Generando audio con ElevenLabs Turbo...');
+      console.log(`🎙️ Generando audio con ${voiceConfig.voice_name}...`);
       
       let finalText = text;
       if (addInitialSilence) {
@@ -151,7 +141,7 @@ wss.on('connection', function connection(ws, req) {
 
       const startTime = Date.now();
 
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
         method: 'POST',
         headers: {
           'Accept': 'audio/mpeg',
@@ -160,14 +150,8 @@ wss.on('connection', function connection(ws, req) {
         },
         body: JSON.stringify({
           text: finalText,
-          model_id: 'eleven_turbo_v2_5',
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.8,
-            style: 0.0,
-            use_speaker_boost: true
-          },
-          optimize_streaming_latency: 4
+          model_id: VOICE_MODEL,
+          voice_settings: VOICE_SETTINGS
         })
       });
 
@@ -226,9 +210,10 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
+  // ✅ FUNCIÓN: Obtener respuesta de GPT usando config de DB
   async function getGPT4Response(userMessage, speakerName) {
     try {
-      console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
+      console.log(`🤖 Obteniendo respuesta de ${agent.llm_model}...`);
       const startTime = Date.now();
 
       const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
@@ -245,16 +230,16 @@ wss.on('connection', function connection(ws, req) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
+          model: agent.llm_model,
           messages: [
             {
               role: 'system',
-              content: ALEX_PROFILE
+              content: AGENT_PROFILE
             },
             ...conversationHistory
           ],
-          temperature: 0.7,
-          max_tokens: 800, 
+          temperature: agent.llm_temperature,
+          max_tokens: agent.llm_max_tokens,
           top_p: 1,
           frequency_penalty: 0,
           presence_penalty: 0
@@ -274,24 +259,24 @@ wss.on('connection', function connection(ws, req) {
         content: assistantMessage
       });
 
-      if (conversationHistory.length > 15) {
-        conversationHistory = conversationHistory.slice(-15);
+      if (conversationHistory.length > CONTEXT_HISTORY_LENGTH) {
+        conversationHistory = conversationHistory.slice(-CONTEXT_HISTORY_LENGTH);
       }
 
       const duration = Date.now() - startTime;
-      console.log(`🎯 Respuesta de GPT-4 en ${duration}ms:`, assistantMessage);
+      console.log(`🎯 Respuesta de ${agent.llm_model} en ${duration}ms:`, assistantMessage);
       
       return assistantMessage;
 
     } catch (error) {
-      console.error('❌ Error obteniendo respuesta de GPT-4:', error.message);
+      console.error('❌ Error obteniendo respuesta de GPT:', error.message);
       throw error;
     }
   }
 
   function activateConversation() {
-    isAlexActive = true;
-    console.log('🟢 MODO ACTIVO: Alex está en conversación');
+    isAgentActive = true;
+    console.log('🟢 MODO ACTIVO: Agente en conversación');
     
     if (conversationTimeoutId) {
       clearTimeout(conversationTimeoutId);
@@ -303,7 +288,7 @@ wss.on('connection', function connection(ws, req) {
     conversationTimeoutId = setTimeout(() => {
       const elapsed = Date.now() - conversationTimeoutStartTime;
       console.log(`🔴 MODO PASIVO: Conversación terminada por inactividad (${elapsed}ms transcurridos)`);
-      isAlexActive = false;
+      isAgentActive = false;
       conversationTimeoutId = null;
     }, CONVERSATION_TIMEOUT);
     
@@ -319,15 +304,12 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // ✅ ELIMINADA: Ya no reiniciamos el timeout durante la conversación
-  // El timeout solo se reinicia cuando Alex responde
-
-  function canAlexRespond() {
+  function canAgentRespond() {
     const now = Date.now();
-    const timeSinceLastResponse = now - lastAlexResponseTime;
+    const timeSinceLastResponse = now - lastAgentResponseTime;
     
-    if (isAlexSpeaking) {
-      console.log('⏸️  Alex está hablando actualmente');
+    if (isAgentSpeaking) {
+      console.log('⏸️  El agente está hablando actualmente');
       return false;
     }
     
@@ -345,15 +327,15 @@ wss.on('connection', function connection(ws, req) {
     return true;
   }
 
-  function shouldAlexRespond(text) {
-    if (isAlexActive) {
-      console.log('💬 MODO ACTIVO: Alex responde (está en conversación)');
+  function shouldAgentRespond(text) {
+    if (isAgentActive) {
+      console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
       return true;
     }
     
     console.log('👂 MODO PASIVO: Verificando triggers...');
     
-    const hasTrigger = detectAlexMentionOrQuestion(text);
+    const hasTrigger = detectAgentMentionOrQuestion(text);
     
     if (hasTrigger) {
       console.log('🔔 Trigger detectado en modo pasivo');
@@ -364,19 +346,38 @@ wss.on('connection', function connection(ws, req) {
     return false;
   }
 
-  function detectAlexMentionOrQuestion(text) {
+  function detectAgentMentionOrQuestion(text) {
     const lowerText = text.toLowerCase();
     
-    if (lowerText.includes('alex')) {
-      console.log('   → Mención de "Alex"');
+    // Detectar mención del nombre del agente
+    const agentNameVariations = [
+      agent.name.toLowerCase(),
+      agent.display_name.toLowerCase()
+    ];
+    
+    const mentionedByName = agentNameVariations.some(name => lowerText.includes(name));
+    
+    if (mentionedByName) {
+      console.log(`   → Mención de "${agent.name}"`);
       return true;
     }
     
-    const questionWords = [
-      'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
-      'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
-      'porque', 'cuál', 'cual', 'cuáles', 'cuales'
-    ];
+    // Detectar preguntas según el idioma
+    let questionWords = [];
+    
+    if (agent.language.startsWith('es')) {
+      // Palabras interrogativas en español
+      questionWords = [
+        'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
+        'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
+        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
+      ];
+    } else if (agent.language.startsWith('en')) {
+      // Palabras interrogativas en inglés
+      questionWords = [
+        'what', 'who', 'how', 'when', 'where', 'why', 'which'
+      ];
+    }
     
     const hasQuestionWord = questionWords.some(word => {
       const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
@@ -398,22 +399,23 @@ wss.on('connection', function connection(ws, req) {
     
     const endsWithPunctuation = /[.!?]$/.test(trimmed);
     
-    const conversationalEndings = [
-      /\bdale$/i,
-      /\bbueno$/i,
-      /\bok$/i,
-      /\bjoya$/i,
-      /\bperfecto$/i,
-      /\bbárbaro$/i,
-      /\bgenial$/i,
-      /\bclaro$/i,
-      /\bexacto$/i,
-      /\bsí$/i,
-      /\bno$/i,
-      /\bgracias$/i,
-      /\bchau$/i,
-      /\bhola$/i
-    ];
+    // Finales conversacionales según idioma
+    let conversationalEndings = [];
+    
+    if (agent.language.startsWith('es')) {
+      conversationalEndings = [
+        /\bdale$/i, /\bbueno$/i, /\bok$/i, /\bjoya$/i,
+        /\bperfecto$/i, /\bbárbaro$/i, /\bgenial$/i,
+        /\bclaro$/i, /\bexacto$/i, /\bsí$/i, /\bno$/i,
+        /\bgracias$/i, /\bchau$/i, /\bhola$/i
+      ];
+    } else if (agent.language.startsWith('en')) {
+      conversationalEndings = [
+        /\bokay$/i, /\bok$/i, /\balright$/i, /\bgreat$/i,
+        /\bperfect$/i, /\bsure$/i, /\byes$/i, /\bno$/i,
+        /\bthanks$/i, /\bbye$/i, /\bhello$/i, /\bhi$/i
+      ];
+    }
     
     const hasConversationalEnding = conversationalEndings.some(pattern => 
       pattern.test(trimmed)
@@ -433,16 +435,16 @@ wss.on('connection', function connection(ws, req) {
     return isComplete;
   }
 
-  async function sendToAlex(text, speakerName) {
-    if (!canAlexRespond()) {
+  async function sendToAgent(text, speakerName) {
+    if (!canAgentRespond()) {
       return;
     }
 
     try {
       isProcessing = true;
-      isAlexSpeaking = true;
+      isAgentSpeaking = true;
       
-      console.log('\n📤 Procesando mensaje para Alex');
+      console.log(`\n📤 Procesando mensaje para ${agent.name}`);
       console.log(`   👤 De: ${speakerName}`);
       console.log(`   💬 Mensaje: ${text}`);
       console.log(`   🎬 Primer mensaje: ${isFirstMessage ? 'SÍ' : 'NO'}`);
@@ -457,21 +459,20 @@ wss.on('connection', function connection(ws, req) {
         console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
       }
 
-      lastAlexResponseTime = Date.now();
+      lastAgentResponseTime = Date.now();
 
       const totalDuration = Date.now() - totalStartTime;
       console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
       console.log(`⏰ Cooldown activado por ${AUDIO_COOLDOWN/1000}s`);
 
     } catch (error) {
-      console.error('❌ Error en sendToAlex:', error.message);
+      console.error('❌ Error en sendToAgent:', error.message);
     } finally {
       isProcessing = false;
       
       setTimeout(() => {
-        isAlexSpeaking = false;
-        console.log('✅ Alex terminó de hablar - Sistema listo');
-        // ✅ CRÍTICO: Solo activar conversación DESPUÉS de que Alex habla
+        isAgentSpeaking = false;
+        console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
         activateConversation();
       }, 2000);
     }
@@ -498,7 +499,7 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${wordCount}`);
       console.log(`   👥 Total speakers: ${uniqueSpeakers.size}`);
-      console.log(`   🎯 Estado: ${isAlexActive ? 'ACTIVO' : 'PASIVO'}`);
+      console.log(`   🎯 Estado: ${isAgentActive ? 'ACTIVO' : 'PASIVO'}`);
       
       const isComplete = isEndOfSentence(fullText);
       console.log(`   ✅ Frase completa: ${isComplete ? 'Sí' : 'No'}`);
@@ -511,12 +512,11 @@ wss.on('connection', function connection(ws, req) {
         return;
       }
 
-      // ✅ Usuario terminó de hablar
       userIsCurrentlySpeaking = false;
 
-      if (shouldAlexRespond(fullText)) {
+      if (shouldAgentRespond(fullText)) {
         console.log('🎯 ¡Respuesta activada! Procesando...');
-        await sendToAlex(fullText, speakerName);
+        await sendToAgent(fullText, speakerName);
       } else {
         console.log('⏭️  No se debe responder');
       }
@@ -544,14 +544,12 @@ wss.on('connection', function connection(ws, req) {
         if (words && words.length > 0 && participant) {
           lastWordTime = Date.now();
           
-          // ✅ Usuario empezó a hablar
           if (!userIsCurrentlySpeaking) {
             userIsCurrentlySpeaking = true;
             console.log('🗣️  Usuario comenzó a hablar');
           }
           
-          // ✅ CRÍTICO: Solo cancelar timeout si es la PRIMERA vez que habla
-          if (isAlexActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
+          if (isAgentActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
             cancelConversationTimeout();
           }
           
@@ -643,4 +641,4 @@ process.on('unhandledRejection', (reason) => {
   console.error('❌ Promesa rechazada:', reason);
 });
 
-console.log('\n📡 Esperando conexiones de Recall.ai...\n');
+console.log('\n📡 Servidor WebSocket listo - Esperando conexiones...\n');
