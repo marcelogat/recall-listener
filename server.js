@@ -319,6 +319,7 @@ wss.on('connection', async function connection(ws, req) {
     return true;
   }
 
+  // ✅ FIX: Activar conversación ANTES de responder en modo pasivo
   function shouldAgentRespond(text) {
     if (isAgentActive) {
       console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
@@ -331,6 +332,8 @@ wss.on('connection', async function connection(ws, req) {
     
     if (hasTrigger) {
       console.log('🔔 Trigger detectado en modo pasivo');
+      console.log('🎯 Activando conversación...');
+      activateConversation(); // ✅ ACTIVAR AQUÍ, antes de retornar true
       return true;
     }
     
@@ -365,18 +368,48 @@ wss.on('connection', async function connection(ws, req) {
       return true;
     }
     
-    // Detectar preguntas según el idioma
+    // ✅ MEJORADO: Detectar frases de pregunta indirecta
+    let questionPhrases = [];
+    
+    if (agent.language.startsWith('es')) {
+      questionPhrases = [
+        'me gustaria saber', 'me gustaria que', 'quisiera saber',
+        'podrias decirme', 'podrias explicarme', 'podrias contarme',
+        'puedes decirme', 'puedes explicarme', 'puedes contarme',
+        'necesito saber', 'quiero saber', 'quiero que me',
+        'tengo una pregunta', 'una pregunta', 'consulta',
+        'ayudame con', 'ayudame a', 'necesito ayuda'
+      ];
+    } else if (agent.language.startsWith('en')) {
+      questionPhrases = [
+        'i would like to know', 'could you tell me', 'could you explain',
+        'can you tell me', 'can you explain', 'i want to know',
+        'i need to know', 'i have a question', 'help me with'
+      ];
+    }
+    
+    const hasQuestionPhrase = questionPhrases.some(phrase => 
+      normalizedText.includes(phrase)
+    );
+    
+    if (hasQuestionPhrase) {
+      console.log('   → Frase de pregunta indirecta detectada');
+      return true;
+    }
+    
+    // Detectar palabras interrogativas
     let questionWords = [];
     
     if (agent.language.startsWith('es')) {
       questionWords = [
         'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
         'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
-        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
+        'porque', 'cuál', 'cual', 'cuáles', 'cuales',
+        'si' // ✅ Agregado: para preguntas con "si"
       ];
     } else if (agent.language.startsWith('en')) {
       questionWords = [
-        'what', 'who', 'how', 'when', 'where', 'why', 'which'
+        'what', 'who', 'how', 'when', 'where', 'why', 'which', 'if'
       ];
     }
     
@@ -390,7 +423,7 @@ wss.on('connection', async function connection(ws, req) {
     const hasQuestionMark = text.includes('?');
     
     if (hasQuestionWord || hasQuestionMark) {
-      console.log('   → Pregunta detectada');
+      console.log('   → Pregunta detectada (palabra interrogativa o ?)');
       return true;
     }
     
@@ -475,7 +508,8 @@ wss.on('connection', async function connection(ws, req) {
       setTimeout(() => {
         isAgentSpeaking = false;
         console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
-        activateConversation();
+        // ✅ REMOVIDO: No llamar activateConversation() aquí
+        // Ya se activó en shouldAgentRespond() cuando detectó el trigger
       }, 2000);
     }
   }
