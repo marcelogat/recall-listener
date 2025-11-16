@@ -27,8 +27,6 @@ async function loadActiveAgent(agentName = null) {
       `)
       .eq('is_active', true);
 
-    // Si se especifica un nombre, buscar ese agente
-    // Si no, buscar el agente por defecto
     if (agentName) {
       query = query.eq('name', agentName.toLowerCase());
       console.log(`   🔍 Buscando agente: ${agentName}`);
@@ -44,7 +42,6 @@ async function loadActiveAgent(agentName = null) {
       throw new Error(`No se pudo cargar el agente${agentName ? ` "${agentName}"` : ' por defecto'}`);
     }
 
-    // Validar que tenga configuración de voz
     if (!agent.agent_voice_config || agent.agent_voice_config.length === 0) {
       throw new Error(`El agente ${agent.name} no tiene configuración de voz`);
     }
@@ -79,10 +76,8 @@ wss.on('connection', async function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
   console.log(`\n✅ Nueva conexión WebSocket desde: ${clientIp}`);
 
-  // ✅ CARGAR AGENTE DESDE LA BASE DE DATOS
   let agentConfig;
   try {
-    // Puedes pasar el nombre del agente como query param: ws://localhost:8080?agent=sofia
     const url = new URL(req.url, `http://${req.headers.host}`);
     const agentName = url.searchParams.get('agent');
     
@@ -95,7 +90,6 @@ wss.on('connection', async function connection(ws, req) {
 
   const { agent, voiceConfig } = agentConfig;
 
-  // ✅ USAR CONFIGURACIÓN DEL AGENTE DESDE LA DB
   const AGENT_PROFILE = agent.profile_text;
   const SILENCE_TIMEOUT = agent.silence_timeout_ms;
   const CONVERSATION_TIMEOUT = agent.conversation_timeout_ms;
@@ -126,7 +120,6 @@ wss.on('connection', async function connection(ws, req) {
 
   console.log(`\n🎙️ ${agent.display_name} está listo y escuchando...\n`);
 
-  // ✅ FUNCIÓN: Generar audio con ElevenLabs usando config de DB
   async function generateElevenLabsAudio(text, addInitialSilence = false) {
     try {
       console.log(`🎙️ Generando audio con ${voiceConfig.voice_name}...`);
@@ -210,7 +203,6 @@ wss.on('connection', async function connection(ws, req) {
     }
   }
 
-  // ✅ FUNCIÓN: Obtener respuesta de GPT usando config de DB
   async function getGPT4Response(userMessage, speakerName) {
     try {
       console.log(`🤖 Obteniendo respuesta de ${agent.llm_model}...`);
@@ -346,16 +338,27 @@ wss.on('connection', async function connection(ws, req) {
     return false;
   }
 
+  // ✅ FUNCIÓN MEJORADA: Detecta menciones y preguntas (con normalización de acentos)
   function detectAgentMentionOrQuestion(text) {
-    const lowerText = text.toLowerCase();
+    // ✅ Función para normalizar texto (quitar acentos)
+    function normalizeText(str) {
+      return str
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    const normalizedText = normalizeText(text);
     
-    // Detectar mención del nombre del agente
+    // Detectar mención del nombre del agente (normalizado)
     const agentNameVariations = [
-      agent.name.toLowerCase(),
-      agent.display_name.toLowerCase()
+      normalizeText(agent.name),
+      normalizeText(agent.display_name)
     ];
     
-    const mentionedByName = agentNameVariations.some(name => lowerText.includes(name));
+    const mentionedByName = agentNameVariations.some(name => 
+      normalizedText.includes(name)
+    );
     
     if (mentionedByName) {
       console.log(`   → Mención de "${agent.name}"`);
@@ -366,22 +369,22 @@ wss.on('connection', async function connection(ws, req) {
     let questionWords = [];
     
     if (agent.language.startsWith('es')) {
-      // Palabras interrogativas en español
       questionWords = [
         'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
         'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
         'porque', 'cuál', 'cual', 'cuáles', 'cuales'
       ];
     } else if (agent.language.startsWith('en')) {
-      // Palabras interrogativas en inglés
       questionWords = [
         'what', 'who', 'how', 'when', 'where', 'why', 'which'
       ];
     }
     
-    const hasQuestionWord = questionWords.some(word => {
+    const normalizedQuestionWords = questionWords.map(w => normalizeText(w));
+    
+    const hasQuestionWord = normalizedQuestionWords.some(word => {
       const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
-      return regex.test(lowerText);
+      return regex.test(normalizedText);
     });
     
     const hasQuestionMark = text.includes('?');
@@ -399,7 +402,6 @@ wss.on('connection', async function connection(ws, req) {
     
     const endsWithPunctuation = /[.!?]$/.test(trimmed);
     
-    // Finales conversacionales según idioma
     let conversationalEndings = [];
     
     if (agent.language.startsWith('es')) {
