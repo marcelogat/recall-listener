@@ -15,10 +15,11 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-// ✅ TIMEOUTS MEJORADOS
-const SILENCE_TIMEOUT_SINGLE_SPEAKER = 3000; // 3 segundos para conversación 1-a-1
-const SILENCE_TIMEOUT_MULTIPLE_SPEAKERS = 1500; // 1.5 segundos para reuniones grupales
-const AUDIO_COOLDOWN = 3000; // 3 segundos de cooldown después de cada respuesta de Alex
+// ✅ TIMEOUTS CONFIGURABLES
+const SILENCE_TIMEOUT = 2500; // 2.5 segundos - Detecta fin de frase
+const CONVERSATION_TIMEOUT = 15000; // 15 segundos - Ventana de conversación activa
+const AUDIO_COOLDOWN = 3000; // 3 segundos - Cooldown entre respuestas
+const FIRST_MESSAGE_SILENCE = 2; // ✅ NUEVO: 2 segundos de silencio al inicio (solo primera vez)
 
 const ALEX_PROFILE = `Sos Alex, un Project Manager de 32 años de Buenos Aires, Argentina. 
 
@@ -120,23 +121,44 @@ wss.on('connection', function connection(ws, req) {
   console.log(`\n✅ Nueva conexión desde: ${clientIp}`);
 
   let currentUtterance = [];
-  let timeoutId = null;
+  let silenceTimeoutId = null;
+  let conversationTimeoutId = null;
   let lastSpeaker = null;
   let botId = null;
   let conversationHistory = [];
   
-  // ✅ SISTEMA DE CONTROL MEJORADO
+  // ✅ SISTEMA DE GESTIÓN DE TURNOS
   let uniqueSpeakers = new Set();
   let isAlexSpeaking = false;
-  let lastAlexResponseTime = 0; // Timestamp de la última respuesta
-  let isProcessing = false; // Flag para evitar procesamiento concurrente
-  let lastWordTime = 0; // Timestamp de la última palabra recibida
+  let isAlexActive = false;
+  let lastAlexResponseTime = 0;
+  let isProcessing = false;
+  let lastWordTime = 0;
+  let isFirstMessage = true; // ✅ NUEVO: Flag para detectar primer mensaje
 
-  // Función OPTIMIZADA para generar audio con ElevenLabs (Turbo v2.5)
-  async function generateElevenLabsAudio(text) {
+  // ✅ NUEVA FUNCIÓN: Generar silencio en MP3
+  function generateSilenceMP3(durationSeconds) {
+    // Generar silencio simple agregando el texto especial para ElevenLabs
+    // Alternativamente, podrías generar un MP3 de silencio real
+    // Por ahora usamos puntos suspensivos que ElevenLabs interpreta como pausa
+    const pauseText = '.'.repeat(Math.floor(durationSeconds * 2)); // Aproximadamente
+    return pauseText;
+  }
+
+  // ✅ FUNCIÓN MODIFICADA: Generar audio con silencio inicial opcional
+  async function generateElevenLabsAudio(text, addInitialSilence = false) {
     try {
       console.log('🎙️ Generando audio con ElevenLabs Turbo...');
-      console.log(`📝 Texto: "${text}"`);
+      
+      // ✅ Agregar silencio al inicio solo en el primer mensaje
+      let finalText = text;
+      if (addInitialSilence) {
+        // Agregamos una pausa al inicio usando etiquetas SSML-like
+        finalText = `<break time="${FIRST_MESSAGE_SILENCE}s"/> ${text}`;
+        console.log(`🔇 Agregando ${FIRST_MESSAGE_SILENCE}s de silencio inicial (primer mensaje)`);
+      }
+      
+      console.log(`📝 Texto: "${finalText}"`);
 
       const startTime = Date.now();
 
@@ -148,7 +170,7 @@ wss.on('connection', function connection(ws, req) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: text,
+          text: finalText,
           model_id: 'eleven_turbo_v2_5',
           voice_settings: {
             stability: 0.5,
@@ -216,7 +238,6 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // Función para obtener respuesta de GPT-4 con información del speaker
   async function getGPT4Response(userMessage, speakerName) {
     try {
       console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
@@ -265,8 +286,8 @@ wss.on('connection', function connection(ws, req) {
         content: assistantMessage
       });
 
-      if (conversationHistory.length > 25) {
-        conversationHistory = conversationHistory.slice(-25);
+      if (conversationHistory.length > 15) {
+        conversationHistory = conversationHistory.slice(-15);
       }
 
       const duration = Date.now() - startTime;
@@ -280,7 +301,28 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // ✅ FUNCIÓN MEJORADA: Verifica si puede responder (cooldown system)
+  function activateConversation() {
+    isAlexActive = true;
+    console.log('🟢 MODO ACTIVO: Alex está en conversación');
+    
+    if (conversationTimeoutId) {
+      clearTimeout(conversationTimeoutId);
+    }
+    
+    conversationTimeoutId = setTimeout(() => {
+      isAlexActive = false;
+      console.log('🔴 MODO PASIVO: Conversación terminada por inactividad (15s)');
+    }, CONVERSATION_TIMEOUT);
+  }
+
+  function cancelConversationTimeout() {
+    if (conversationTimeoutId) {
+      clearTimeout(conversationTimeoutId);
+      conversationTimeoutId = null;
+      console.log('⏸️  Timeout de conversación cancelado (usuario empezó a hablar)');
+    }
+  }
+
   function canAlexRespond() {
     const now = Date.now();
     const timeSinceLastResponse = now - lastAlexResponseTime;
@@ -304,31 +346,32 @@ wss.on('connection', function connection(ws, req) {
     return true;
   }
 
-  // Detecta si debe responder según el número de speakers
   function shouldAlexRespond(text) {
     const speakerCount = uniqueSpeakers.size;
     
-    // Modo 1: Solo 1 speaker (conversación 1-a-1 con Alex)
-    if (speakerCount === 1) {
-      console.log('💬 Modo conversación 1-a-1: Alex responde automáticamente');
+    if (isAlexActive) {
+      console.log('💬 MODO ACTIVO: Alex responde (está en conversación)');
       return true;
     }
     
-    // Modo 2: Múltiples speakers (reunión grupal)
-    if (speakerCount > 1) {
-      console.log('👥 Modo reunión grupal: Verificando triggers...');
-      return detectAlexMentionOrQuestion(text);
+    console.log('👂 MODO PASIVO: Verificando triggers...');
+    
+    const hasTrigger = detectAlexMentionOrQuestion(text);
+    
+    if (hasTrigger) {
+      console.log('🔔 Trigger detectado en modo pasivo');
+      return true;
     }
     
+    console.log('⏭️  Sin trigger en modo pasivo, ignorando');
     return false;
   }
 
-  // Detecta mención de Alex O preguntas
   function detectAlexMentionOrQuestion(text) {
     const lowerText = text.toLowerCase();
     
     if (lowerText.includes('alex')) {
-      console.log('🔔 Detección: Mención de "Alex"');
+      console.log('   → Mención de "Alex"');
       return true;
     }
     
@@ -346,25 +389,54 @@ wss.on('connection', function connection(ws, req) {
     const hasQuestionMark = text.includes('?');
     
     if (hasQuestionWord || hasQuestionMark) {
-      console.log('🔔 Detección: Pregunta detectada');
+      console.log('   → Pregunta detectada');
       return true;
     }
     
     return false;
   }
 
-  // ✅ FUNCIÓN MEJORADA: Detecta fin de frase
   function isEndOfSentence(text) {
     const trimmed = text.trim();
-    // Detecta puntos, signos de interrogación, exclamación, o pausas naturales
-    const endsWithPunctuation = /[.!?]$/.test(trimmed);
-    const hasCompleteSentence = trimmed.length > 20; // Mínimo de caracteres para considerar frase completa
     
-    return endsWithPunctuation && hasCompleteSentence;
+    const endsWithPunctuation = /[.!?]$/.test(trimmed);
+    
+    const conversationalEndings = [
+      /\bdale$/i,
+      /\bbueno$/i,
+      /\bok$/i,
+      /\bjoya$/i,
+      /\bperfecto$/i,
+      /\bbárbaro$/i,
+      /\bgenial$/i,
+      /\bclaro$/i,
+      /\bexacto$/i,
+      /\bsí$/i,
+      /\bno$/i,
+      /\bgracias$/i,
+      /\bchau$/i,
+      /\bhola$/i
+    ];
+    
+    const hasConversationalEnding = conversationalEndings.some(pattern => 
+      pattern.test(trimmed)
+    );
+    
+    const hasCompleteThought = trimmed.split(' ').length >= 3;
+    
+    const isShortValidResponse = trimmed.split(' ').length <= 5 && (
+      endsWithPunctuation || hasConversationalEnding
+    );
+    
+    const isComplete = endsWithPunctuation || 
+                      hasConversationalEnding || 
+                      (hasCompleteThought && trimmed.length > 15) ||
+                      isShortValidResponse;
+    
+    return isComplete;
   }
 
   async function sendToAlex(text, speakerName) {
-    // ✅ VERIFICACIÓN COMPLETA antes de responder
     if (!canAlexRespond()) {
       return;
     }
@@ -376,13 +448,21 @@ wss.on('connection', function connection(ws, req) {
       console.log('\n📤 Procesando mensaje para Alex');
       console.log(`   👤 De: ${speakerName}`);
       console.log(`   💬 Mensaje: ${text}`);
+      console.log(`   🎬 Primer mensaje: ${isFirstMessage ? 'SÍ' : 'NO'}`);
       const totalStartTime = Date.now();
 
       const responseText = await getGPT4Response(text, speakerName);
-      const audioBase64 = await generateElevenLabsAudio(responseText);
+      
+      // ✅ CRÍTICO: Pasar flag de primer mensaje
+      const audioBase64 = await generateElevenLabsAudio(responseText, isFirstMessage);
       await sendAudioToBot(audioBase64);
 
-      // ✅ ACTUALIZAR timestamp de última respuesta
+      // ✅ Marcar que ya no es el primer mensaje
+      if (isFirstMessage) {
+        isFirstMessage = false;
+        console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
+      }
+
       lastAlexResponseTime = Date.now();
 
       const totalDuration = Date.now() - totalStartTime;
@@ -394,12 +474,12 @@ wss.on('connection', function connection(ws, req) {
     } finally {
       isProcessing = false;
       
-      // ✅ Estimar duración del audio y liberar después
-      // Asumiendo ~150 palabras por minuto de audio
       setTimeout(() => {
         isAlexSpeaking = false;
         console.log('✅ Alex terminó de hablar - Sistema listo');
-      }, 2000); // 2 segundos adicionales de buffer
+        
+        activateConversation();
+      }, 2000);
     }
   }
 
@@ -416,26 +496,32 @@ wss.on('connection', function connection(ws, req) {
       const speakerName = currentUtterance[0].speakerName;
       const startTime = currentUtterance[0].start_time;
       const endTime = currentUtterance[currentUtterance.length - 1].end_time;
+      const wordCount = currentUtterance.length;
 
       console.log('\n💾 PROCESANDO TRANSCRIPT COMPLETO:');
       console.log(`   👤 Speaker: ${speakerName} (${speaker})`);
       console.log(`   📝 Texto: "${fullText}"`);
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
-      console.log(`   📊 Palabras: ${currentUtterance.length}`);
+      console.log(`   📊 Palabras: ${wordCount}`);
       console.log(`   👥 Total speakers: ${uniqueSpeakers.size}`);
-      console.log(`   ✅ Frase completa: ${isEndOfSentence(fullText) ? 'Sí' : 'No'}`);
+      console.log(`   🎯 Estado: ${isAlexActive ? 'ACTIVO' : 'PASIVO'}`);
+      
+      const isComplete = isEndOfSentence(fullText);
+      console.log(`   ✅ Frase completa: ${isComplete ? 'Sí' : 'No'}`);
 
-      // ✅ VERIFICAR que sea una frase completa antes de procesar
-      if (!isEndOfSentence(fullText)) {
-        console.log('⏭️  Esperando más contenido (frase incompleta)');
+      const hasMinimumWords = wordCount >= 2;
+      const shouldProcess = isComplete || hasMinimumWords;
+
+      if (!shouldProcess) {
+        console.log('⏭️  Esperando más contenido (muy corto)');
         return;
       }
 
       if (shouldAlexRespond(fullText)) {
-        console.log('🎯 ¡Trigger activado! Verificando si puede responder...');
+        console.log('🎯 ¡Respuesta activada! Procesando...');
         await sendToAlex(fullText, speakerName);
       } else {
-        console.log('⏭️  No se detectó trigger, continuando...');
+        console.log('⏭️  No se debe responder');
       }
 
       currentUtterance = [];
@@ -459,8 +545,11 @@ wss.on('connection', function connection(ws, req) {
         }
 
         if (words && words.length > 0 && participant) {
-          // ✅ Actualizar timestamp de última palabra
           lastWordTime = Date.now();
+          
+          if (isAlexActive) {
+            cancelConversationTimeout();
+          }
           
           console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
 
@@ -489,23 +578,17 @@ wss.on('connection', function connection(ws, req) {
 
           lastSpeaker = speakerId;
 
-          if (timeoutId) {
-            clearTimeout(timeoutId);
+          if (silenceTimeoutId) {
+            clearTimeout(silenceTimeoutId);
           }
 
-          // ✅ TIMEOUT DINÁMICO según número de speakers
-          const timeout = uniqueSpeakers.size === 1 
-            ? SILENCE_TIMEOUT_SINGLE_SPEAKER 
-            : SILENCE_TIMEOUT_MULTIPLE_SPEAKERS;
-
-          timeoutId = setTimeout(() => {
+          silenceTimeoutId = setTimeout(() => {
             const timeSinceLastWord = Date.now() - lastWordTime;
-            console.log(`⏱️  Timeout alcanzado (${timeSinceLastWord}ms desde última palabra)`);
+            console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
             processCompleteUtterance();
-          }, timeout);
+          }, SILENCE_TIMEOUT);
 
           console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
-          console.log(`   Timeout configurado: ${timeout}ms`);
         }
       } else if (data.event === 'transcript.partial_data') {
         console.log('   ⏭️  Ignorando partial_data');
@@ -524,8 +607,12 @@ wss.on('connection', function connection(ws, req) {
       await processCompleteUtterance();
     }
     
-    if (timeoutId) {
-      clearTimeout(timeoutId);
+    if (silenceTimeoutId) {
+      clearTimeout(silenceTimeoutId);
+    }
+    
+    if (conversationTimeoutId) {
+      clearTimeout(conversationTimeoutId);
     }
   });
 
