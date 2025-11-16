@@ -47,6 +47,7 @@ ESTILO DE COMUNICACIÓN PARA AUDIO:
 - Mantenés un equilibrio entre profesional y amigable. No sos formal en exceso, pero tampoco demasiado casual.
 - Hablás con ritmo natural. Hacés pausas donde corresponde.
 - Evitás siglas complicadas. Decís las cosas completas cuando es necesario.
+- Cuando sepas el nombre de quien te habla, usalo ocasionalmente de forma natural para personalizar la conversación.
 
 EXPERTISE EN METODOLOGÍAS:
 - Dominás Scrum, Kanban, y metodologías híbridas. Adaptás la metodología al contexto del equipo.
@@ -138,14 +139,14 @@ wss.on('connection', function connection(ws, req) {
         },
         body: JSON.stringify({
           text: text,
-          model_id: 'eleven_turbo_v2_5', // ✅ MODELO TURBO (mucho más rápido)
+          model_id: 'eleven_turbo_v2_5',
           voice_settings: {
             stability: 0.5,
             similarity_boost: 0.8,
             style: 0.0,
             use_speaker_boost: true
           },
-          optimize_streaming_latency: 4 // ✅ Máxima optimización de latencia
+          optimize_streaming_latency: 4
         })
       });
 
@@ -205,15 +206,18 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // Función OPTIMIZADA para obtener respuesta de GPT-4
-  async function getGPT4Response(userMessage) {
+  // ✅ FUNCIÓN MEJORADA: Obtiene respuesta de GPT-4 con información del speaker
+  async function getGPT4Response(userMessage, speakerName) {
     try {
       console.log('🤖 Obteniendo respuesta de GPT-4o-mini...');
       const startTime = Date.now();
 
+      // ✅ Agregar el nombre del speaker al mensaje
+      const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
+
       conversationHistory.push({
         role: 'user',
-        content: userMessage
+        content: messageWithSpeaker
       });
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -252,8 +256,9 @@ wss.on('connection', function connection(ws, req) {
         content: assistantMessage
       });
 
-      if (conversationHistory.length > 10) {
-        conversationHistory = conversationHistory.slice(-10);
+      // ✅ CAMBIO: Contexto ampliado de 10 a 25 mensajes
+      if (conversationHistory.length > 25) {
+        conversationHistory = conversationHistory.slice(-25);
       }
 
       const duration = Date.now() - startTime;
@@ -267,18 +272,49 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  function detectAlexMention(text) {
+  // Detecta mención de Alex O preguntas
+  function detectAlexMentionOrQuestion(text) {
     const lowerText = text.toLowerCase();
-    return lowerText.includes('alex');
+    
+    // Detectar mención directa de Alex
+    if (lowerText.includes('alex')) {
+      console.log('🔔 Detección: Mención de "Alex"');
+      return true;
+    }
+    
+    // Detectar preguntas por palabras interrogativas en español
+    const questionWords = [
+      'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
+      'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
+      'porque', 'cuál', 'cual', 'cuáles', 'cuales'
+    ];
+    
+    const hasQuestionWord = questionWords.some(word => {
+      // Buscar la palabra al inicio o precedida por espacio
+      const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
+      return regex.test(lowerText);
+    });
+    
+    // Detectar signos de interrogación
+    const hasQuestionMark = text.includes('?');
+    
+    if (hasQuestionWord || hasQuestionMark) {
+      console.log('🔔 Detección: Pregunta detectada');
+      return true;
+    }
+    
+    return false;
   }
 
-  async function sendToAlex(text) {
+  // ✅ FUNCIÓN MEJORADA: Ahora recibe también el nombre del speaker
+  async function sendToAlex(text, speakerName) {
     try {
-      console.log('\n📤 Procesando mensaje para Alex:', text);
+      console.log('\n📤 Procesando mensaje para Alex');
+      console.log(`   👤 De: ${speakerName}`);
+      console.log(`   💬 Mensaje: ${text}`);
       const totalStartTime = Date.now();
 
-      // ✅ OPTIMIZACIÓN: Ejecutar en secuencia pero con tracking de tiempo
-      const responseText = await getGPT4Response(text);
+      const responseText = await getGPT4Response(text, speakerName);
       const audioBase64 = await generateElevenLabsAudio(responseText);
       await sendAudioToBot(audioBase64);
 
@@ -306,9 +342,10 @@ wss.on('connection', function connection(ws, req) {
       console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
       console.log(`   📊 Palabras: ${currentUtterance.length}`);
 
-      if (detectAlexMention(fullText)) {
-        console.log('🔔 ¡Alex fue mencionado! Procesando respuesta...');
-        await sendToAlex(fullText);
+      // ✅ CAMBIO: Ahora pasamos también el nombre del speaker
+      if (detectAlexMentionOrQuestion(fullText)) {
+        console.log('🎯 ¡Trigger activado! Procesando respuesta...');
+        await sendToAlex(fullText, speakerName);
       }
 
       currentUtterance = [];
