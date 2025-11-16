@@ -17,7 +17,7 @@ console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
 // ✅ TIMEOUTS CONFIGURABLES
 const SILENCE_TIMEOUT = 2500; // 2.5 segundos - Detecta fin de frase
-const CONVERSATION_TIMEOUT = 20000; // ✅ AUMENTADO A 20 segundos - Ventana de conversación activa
+const CONVERSATION_TIMEOUT = 25000; // ✅ 25 segundos - Ventana de conversación activa
 const AUDIO_COOLDOWN = 3000; // 3 segundos - Cooldown entre respuestas
 const FIRST_MESSAGE_SILENCE = 2; // 2 segundos de silencio al inicio (solo primera vez)
 
@@ -134,7 +134,8 @@ wss.on('connection', function connection(ws, req) {
   let isProcessing = false;
   let lastWordTime = 0;
   let isFirstMessage = true;
-  let conversationTimeoutStartTime = 0; // ✅ NUEVO: Para debug
+  let conversationTimeoutStartTime = 0;
+  let userIsCurrentlySpeaking = false; // ✅ NUEVO: Track si el usuario está hablando
 
   async function generateElevenLabsAudio(text, addInitialSilence = false) {
     try {
@@ -297,7 +298,7 @@ wss.on('connection', function connection(ws, req) {
       console.log('   ⏱️  Timeout anterior cancelado');
     }
     
-    conversationTimeoutStartTime = Date.now(); // ✅ Guardar timestamp
+    conversationTimeoutStartTime = Date.now();
     
     conversationTimeoutId = setTimeout(() => {
       const elapsed = Date.now() - conversationTimeoutStartTime;
@@ -314,16 +315,12 @@ wss.on('connection', function connection(ws, req) {
       const elapsed = Date.now() - conversationTimeoutStartTime;
       clearTimeout(conversationTimeoutId);
       conversationTimeoutId = null;
-      console.log(`⏸️  Timeout de conversación CANCELADO (había transcurrido ${elapsed}ms de ${CONVERSATION_TIMEOUT}ms)`);
+      console.log(`⏸️  Timeout CANCELADO (había transcurrido ${elapsed}ms de ${CONVERSATION_TIMEOUT}ms)`);
     }
   }
 
-  function restartConversationTimeout() {
-    if (isAlexActive) {
-      console.log('♻️  Reiniciando timeout de conversación...');
-      activateConversation();
-    }
-  }
+  // ✅ ELIMINADA: Ya no reiniciamos el timeout durante la conversación
+  // El timeout solo se reinicia cuando Alex responde
 
   function canAlexRespond() {
     const now = Date.now();
@@ -474,6 +471,7 @@ wss.on('connection', function connection(ws, req) {
       setTimeout(() => {
         isAlexSpeaking = false;
         console.log('✅ Alex terminó de hablar - Sistema listo');
+        // ✅ CRÍTICO: Solo activar conversación DESPUÉS de que Alex habla
         activateConversation();
       }, 2000);
     }
@@ -513,15 +511,14 @@ wss.on('connection', function connection(ws, req) {
         return;
       }
 
+      // ✅ Usuario terminó de hablar
+      userIsCurrentlySpeaking = false;
+
       if (shouldAlexRespond(fullText)) {
         console.log('🎯 ¡Respuesta activada! Procesando...');
         await sendToAlex(fullText, speakerName);
       } else {
         console.log('⏭️  No se debe responder');
-        
-        if (isAlexActive) {
-          restartConversationTimeout();
-        }
       }
 
       currentUtterance = [];
@@ -547,8 +544,14 @@ wss.on('connection', function connection(ws, req) {
         if (words && words.length > 0 && participant) {
           lastWordTime = Date.now();
           
-          // ✅ CRÍTICO: Cancelar timeout SIEMPRE que llegue transcript.data en modo activo
-          if (isAlexActive && conversationTimeoutId) {
+          // ✅ Usuario empezó a hablar
+          if (!userIsCurrentlySpeaking) {
+            userIsCurrentlySpeaking = true;
+            console.log('🗣️  Usuario comenzó a hablar');
+          }
+          
+          // ✅ CRÍTICO: Solo cancelar timeout si es la PRIMERA vez que habla
+          if (isAlexActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
             cancelConversationTimeout();
           }
           
