@@ -19,7 +19,7 @@ console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 const SILENCE_TIMEOUT = 2500; // 2.5 segundos - Detecta fin de frase
 const CONVERSATION_TIMEOUT = 15000; // 15 segundos - Ventana de conversación activa
 const AUDIO_COOLDOWN = 3000; // 3 segundos - Cooldown entre respuestas
-const FIRST_MESSAGE_SILENCE = 2; // ✅ NUEVO: 2 segundos de silencio al inicio (solo primera vez)
+const FIRST_MESSAGE_SILENCE = 2; // 2 segundos de silencio al inicio (solo primera vez)
 
 const ALEX_PROFILE = `Sos Alex, un Project Manager de 32 años de Buenos Aires, Argentina. 
 
@@ -127,33 +127,20 @@ wss.on('connection', function connection(ws, req) {
   let botId = null;
   let conversationHistory = [];
   
-  // ✅ SISTEMA DE GESTIÓN DE TURNOS
   let uniqueSpeakers = new Set();
   let isAlexSpeaking = false;
   let isAlexActive = false;
   let lastAlexResponseTime = 0;
   let isProcessing = false;
   let lastWordTime = 0;
-  let isFirstMessage = true; // ✅ NUEVO: Flag para detectar primer mensaje
+  let isFirstMessage = true;
 
-  // ✅ NUEVA FUNCIÓN: Generar silencio en MP3
-  function generateSilenceMP3(durationSeconds) {
-    // Generar silencio simple agregando el texto especial para ElevenLabs
-    // Alternativamente, podrías generar un MP3 de silencio real
-    // Por ahora usamos puntos suspensivos que ElevenLabs interpreta como pausa
-    const pauseText = '.'.repeat(Math.floor(durationSeconds * 2)); // Aproximadamente
-    return pauseText;
-  }
-
-  // ✅ FUNCIÓN MODIFICADA: Generar audio con silencio inicial opcional
   async function generateElevenLabsAudio(text, addInitialSilence = false) {
     try {
       console.log('🎙️ Generando audio con ElevenLabs Turbo...');
       
-      // ✅ Agregar silencio al inicio solo en el primer mensaje
       let finalText = text;
       if (addInitialSilence) {
-        // Agregamos una pausa al inicio usando etiquetas SSML-like
         finalText = `<break time="${FIRST_MESSAGE_SILENCE}s"/> ${text}`;
         console.log(`🔇 Agregando ${FIRST_MESSAGE_SILENCE}s de silencio inicial (primer mensaje)`);
       }
@@ -201,7 +188,6 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
-  // Función para enviar audio al bot de Recall.ai
   async function sendAudioToBot(audioBase64) {
     if (!botId) {
       console.error('❌ No hay bot_id disponible para enviar audio');
@@ -301,25 +287,41 @@ wss.on('connection', function connection(ws, req) {
     }
   }
 
+  // ✅ FUNCIÓN MEJORADA: Activar conversación y gestionar timeout
   function activateConversation() {
     isAlexActive = true;
     console.log('🟢 MODO ACTIVO: Alex está en conversación');
     
+    // ✅ Cancelar timeout anterior si existe
     if (conversationTimeoutId) {
       clearTimeout(conversationTimeoutId);
+      console.log('   ⏱️  Timeout anterior cancelado');
     }
     
+    // ✅ Iniciar nuevo timeout de conversación (15s)
     conversationTimeoutId = setTimeout(() => {
       isAlexActive = false;
+      conversationTimeoutId = null;
       console.log('🔴 MODO PASIVO: Conversación terminada por inactividad (15s)');
     }, CONVERSATION_TIMEOUT);
+    
+    console.log(`   ⏰ Nuevo timeout de conversación: ${CONVERSATION_TIMEOUT/1000}s`);
   }
 
+  // ✅ FUNCIÓN MEJORADA: Cancelar timeout cuando el usuario habla
   function cancelConversationTimeout() {
     if (conversationTimeoutId) {
       clearTimeout(conversationTimeoutId);
       conversationTimeoutId = null;
-      console.log('⏸️  Timeout de conversación cancelado (usuario empezó a hablar)');
+      console.log('⏸️  Timeout de conversación cancelado (usuario está hablando)');
+    }
+  }
+
+  // ✅ FUNCIÓN NUEVA: Reiniciar timeout de conversación después de procesar
+  function restartConversationTimeout() {
+    if (isAlexActive) {
+      console.log('♻️  Reiniciando timeout de conversación...');
+      activateConversation();
     }
   }
 
@@ -347,8 +349,6 @@ wss.on('connection', function connection(ws, req) {
   }
 
   function shouldAlexRespond(text) {
-    const speakerCount = uniqueSpeakers.size;
-    
     if (isAlexActive) {
       console.log('💬 MODO ACTIVO: Alex responde (está en conversación)');
       return true;
@@ -452,12 +452,9 @@ wss.on('connection', function connection(ws, req) {
       const totalStartTime = Date.now();
 
       const responseText = await getGPT4Response(text, speakerName);
-      
-      // ✅ CRÍTICO: Pasar flag de primer mensaje
       const audioBase64 = await generateElevenLabsAudio(responseText, isFirstMessage);
       await sendAudioToBot(audioBase64);
 
-      // ✅ Marcar que ya no es el primer mensaje
       if (isFirstMessage) {
         isFirstMessage = false;
         console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
@@ -478,6 +475,7 @@ wss.on('connection', function connection(ws, req) {
         isAlexSpeaking = false;
         console.log('✅ Alex terminó de hablar - Sistema listo');
         
+        // ✅ Activar modo conversación
         activateConversation();
       }, 2000);
     }
@@ -522,6 +520,11 @@ wss.on('connection', function connection(ws, req) {
         await sendToAlex(fullText, speakerName);
       } else {
         console.log('⏭️  No se debe responder');
+        
+        // ✅ CRÍTICO: Si no responde pero está en modo activo, reiniciar timeout
+        if (isAlexActive) {
+          restartConversationTimeout();
+        }
       }
 
       currentUtterance = [];
@@ -547,6 +550,7 @@ wss.on('connection', function connection(ws, req) {
         if (words && words.length > 0 && participant) {
           lastWordTime = Date.now();
           
+          // ✅ CRÍTICO: Cancelar timeout cuando el usuario empieza a hablar
           if (isAlexActive) {
             cancelConversationTimeout();
           }
