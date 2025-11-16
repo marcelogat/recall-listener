@@ -15,7 +15,7 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-const SILENCE_TIMEOUT = 3000;
+const SILENCE_TIMEOUT = 0;
 
 const ALEX_PROFILE = `Eres Alex, un project manager de 32 años de Buenos Aires con experiencia en empresas internacionales. Responde de forma amigable y profesional.`;
 
