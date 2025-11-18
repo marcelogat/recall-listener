@@ -517,18 +517,18 @@ wss.on('connection', async function connection(ws, req) {
       setTimeout(() => {
         isAgentSpeaking = false;
         console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
-        // ✅ REMOVIDO: No llamar activateConversation() aquí
-        // Ya se activó en shouldAgentRespond() cuando detectó el trigger
       }, 2000);
     }
   }
 
   async function processCompleteUtterance() {
-    if (currentUtterance.length === 0) return;
+    // ✅ FIX CRÍTICO: Verificar isProcessing ANTES de hacer cualquier cosa
     if (isProcessing) {
-      console.log('⏭️  Ya hay un procesamiento en curso, ignorando');
+      console.log('⏭️  Ya hay un procesamiento en curso, ignorando utterance completo');
       return;
     }
+
+    if (currentUtterance.length === 0) return;
 
     try {
       const fullText = currentUtterance.map(word => word.text).join(' ');
@@ -573,7 +573,7 @@ wss.on('connection', async function connection(ws, req) {
     }
   }
 
-  ws.on('message', function incoming(message) {
+  ws.on('message', async function incoming(message) {
     try {
       const data = JSON.parse(message);
       
@@ -605,9 +605,16 @@ wss.on('connection', async function connection(ws, req) {
           
           uniqueSpeakers.add(speakerId);
 
+          // ✅ FIX CRÍTICO: Verificar isProcessing ANTES de procesar cambio de speaker
           if (lastSpeaker !== null && lastSpeaker !== speakerId) {
             console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
-            processCompleteUtterance();
+            
+            if (isProcessing) {
+              console.log('⏭️  Ya hay un procesamiento en curso, ignorando cambio de speaker');
+            } else {
+              // ✅ FIX: Usar await para asegurarnos que termine antes de continuar
+              await processCompleteUtterance();
+            }
           }
 
           words.forEach(word => {
@@ -629,10 +636,25 @@ wss.on('connection', async function connection(ws, req) {
             clearTimeout(silenceTimeoutId);
           }
 
-          silenceTimeoutId = setTimeout(() => {
+          // ✅ FIX: El timeout también debe verificar isProcessing
+          silenceTimeoutId = setTimeout(async () => {
+            if (isProcessing) {
+              console.log('⏭️  Procesamiento en curso, posponer timeout de silencio');
+              // Re-programar el timeout
+              if (silenceTimeoutId) {
+                clearTimeout(silenceTimeoutId);
+              }
+              silenceTimeoutId = setTimeout(async () => {
+                const timeSinceLastWord = Date.now() - lastWordTime;
+                console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
+                await processCompleteUtterance();
+              }, SILENCE_TIMEOUT);
+              return;
+            }
+            
             const timeSinceLastWord = Date.now() - lastWordTime;
             console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
-            processCompleteUtterance();
+            await processCompleteUtterance();
           }, SILENCE_TIMEOUT);
 
           console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
