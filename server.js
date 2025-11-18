@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FASE 5: PROD READY (Fluidez + Fix Primer Audio)
+// server.js - FASE 6: SINGLE SHOT (Audio Entero y Fluido)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,13 +11,11 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// ⚡ CALIBRACIÓN DE FLUIDEZ
+// ⚡ TIEMPOS
 const SILENCE_THRESHOLD_MS = 600; 
-const CHARS_PER_SECOND = 15; 
-const MIN_CHUNK_LENGTH = 50; 
-const FIRST_MESSAGE_DELAY_MS = 1200; // 🟢 TIEMPO EXTRA PARA EL PRIMER DESMUTEO
+const FIRST_MESSAGE_DELAY_MS = 1500; // Tiempo para desmutearse al inicio
 
-console.log('🚀 Servidor WebSocket: PRODUCTION READY');
+console.log('🚀 Servidor WebSocket: SINGLE SHOT AUDIO ONLINE');
 
 // ════════════════════════════════════════════════════════════════
 // 1. SUPABASE
@@ -32,7 +30,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. GESTOR DE STREAMING
+// 2. GESTOR DE RESPUESTA (Sin Particiones)
 // ════════════════════════════════════════════════════════════════
 
 class StreamManager {
@@ -43,13 +41,9 @@ class StreamManager {
     this.voiceId = voiceConfig.id;
     this.conversationHistory = [];
     
-    this.audioQueue = []; 
-    this.isProcessingQueue = false;
-    this.currentWaitTimer = null;
-    this.isInterrupted = false;
-    
-    // 🟢 ESTADO PARA EL FIX DEL PRIMER AUDIO
+    this.isProcessing = false;
     this.isFirstInteraction = true; 
+    this.isInterrupted = false;
   }
 
   addToHistory(role, text) {
@@ -66,12 +60,7 @@ class StreamManager {
 
   stop() {
     this.isInterrupted = true;
-    this.audioQueue = []; 
-    if (this.currentWaitTimer) {
-      clearTimeout(this.currentWaitTimer);
-      this.currentWaitTimer = null;
-    }
-    this.isProcessingQueue = false;
+    this.isProcessing = false;
     console.log('🛑 Interrupción.');
   }
 
@@ -80,17 +69,20 @@ class StreamManager {
     
     console.log(`📝 Usuario: "${userText}"`);
     this.addToHistory('user', userText);
+    
     this.isInterrupted = false; 
+    this.isProcessing = true;
 
     const systemPrompt = `
     Eres ${this.agentName}, ${this.agentRole}.
-    INSTRUCCIONES DE VOZ:
-    1. Habla fluido y natural.
-    2. Evita frases robóticas muy cortas.
-    3. Sé cálida, empática y profesional.
+    INSTRUCCIONES:
+    1. Responde de forma natural y conversacional.
+    2. NO hagas listas. Usa párrafos cortos.
+    3. Sé cálida y directa.
     `;
 
     try {
+      // 1. OBTENER TEXTO COMPLETO DE GPT (Esperamos la idea completa)
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -103,139 +95,76 @@ class StreamManager {
             { role: 'system', content: systemPrompt },
             ...this.getFormattedHistory()
           ],
-          stream: true,
-          temperature: 0.6,
-          max_tokens: 300
+          temperature: 0.7,
+          max_tokens: 250 // Respuesta concisa
         })
       });
 
-      const reader = response.body;
-      let sentenceBuffer = "";
-      let fullResponse = "";
+      const data = await response.json();
+      
+      if (this.isInterrupted) return; // Si el usuario habló mientras pensábamos, cancelamos
 
-      for await (const chunk of reader) {
-        if (this.isInterrupted) break;
+      const fullText = data.choices[0].message.content;
+      console.log(`🧠 Respuesta GPT: "${fullText}"`);
 
-        const chunkString = chunk.toString();
-        const lines = chunkString.split('\n').filter(line => line.trim() !== '');
+      // 2. GENERAR UN SOLO AUDIO (Fluidez garantizada)
+      await this.generateAndSendAudio(fullText);
 
-        for (const line of lines) {
-          if (line.includes('[DONE]')) continue;
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              const content = data.choices[0].delta.content;
-              
-              if (content) {
-                fullResponse += content;
-                sentenceBuffer += content;
-
-                if (sentenceBuffer.match(/[.?!;]/)) {
-                   const isLongEnough = sentenceBuffer.length > MIN_CHUNK_LENGTH;
-                   const isQuestion = sentenceBuffer.includes('?');
-                   
-                   if (isLongEnough || isQuestion) {
-                       const match = sentenceBuffer.match(/[.?!;]/g); 
-                       const lastPunctuationChar = match[match.length - 1];
-                       const lastIndex = sentenceBuffer.lastIndexOf(lastPunctuationChar);
-
-                       const completeChunk = sentenceBuffer.substring(0, lastIndex + 1);
-                       const remainder = sentenceBuffer.substring(lastIndex + 1);
-                       
-                       if (completeChunk.trim().length > 0) {
-                          this.queueAudio(completeChunk.trim());
-                          sentenceBuffer = remainder;
-                       }
-                   }
-                }
-              }
-            } catch (e) {}
-          }
-        }
+      if (!this.isInterrupted) {
+          this.addToHistory(this.agentName, fullText);
       }
-
-      if (sentenceBuffer.trim().length > 0 && !this.isInterrupted) {
-        this.queueAudio(sentenceBuffer.trim());
-      }
-
-      if (!this.isInterrupted) this.addToHistory(this.agentName, fullResponse);
 
     } catch (error) {
-      console.error('❌ Error Stream:', error.message);
+      console.error('❌ Error Proceso:', error.message);
+    } finally {
+      this.isProcessing = false;
     }
-  }
-
-  // --- COLA DE AUDIO CON FIX DE ARRANQUE ---
-  queueAudio(text) {
-    if (this.isInterrupted) return;
-    this.audioQueue.push(text);
-    this.processQueue();
-  }
-
-  async processQueue() {
-    if (this.isProcessingQueue) return; 
-    this.isProcessingQueue = true;
-
-    while (this.audioQueue.length > 0) {
-      if (this.isInterrupted) {
-        this.audioQueue = [];
-        break;
-      }
-
-      // 🟢 FIX DE ARRANQUE: SI ES LA PRIMERA VEZ, ESPERAMOS
-      if (this.isFirstInteraction) {
-        console.log(`🔌 Primer mensaje: Esperando ${FIRST_MESSAGE_DELAY_MS}ms para desmuteo...`);
-        await new Promise(resolve => setTimeout(resolve, FIRST_MESSAGE_DELAY_MS));
-        this.isFirstInteraction = false; // Ya no esperamos más en las siguientes
-      }
-
-      const text = this.audioQueue.shift();
-      
-      try {
-        await this.generateAndSendAudio(text);
-        
-        // Calculamos espera normal para sincronizar
-        const durationMs = (text.length / CHARS_PER_SECOND) * 1000;
-        const waitTime = Math.max(500, durationMs - 200); 
-        
-        console.log(`🔊 Reproduciendo: "${text}" (${Math.round(waitTime)}ms)`);
-        
-        await new Promise(resolve => {
-          this.currentWaitTimer = setTimeout(resolve, waitTime);
-        });
-
-      } catch (e) {
-        console.error('Audio Error:', e.message);
-      }
-    }
-
-    this.isProcessingQueue = false;
   }
 
   async generateAndSendAudio(text) {
-    const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': process.env.ELEVENLABS_API_KEY,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        text: text,
-        model: 'eleven_turbo_v2_5',
-        voice_settings: { stability: 0.4, similarity_boost: 0.7 },
-        optimize_streaming_latency: 4
-      })
-    });
+    if (this.isInterrupted) return;
 
-    if (!audioResp.ok) throw new Error(`ElevenLabs: ${audioResp.status}`);
-    const arrayBuffer = await audioResp.arrayBuffer();
-    const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+    // 🟢 FIX DE ARRANQUE: Espera antes del primer audio
+    if (this.isFirstInteraction) {
+      console.log(`🔌 Calentando motores (${FIRST_MESSAGE_DELAY_MS}ms)...`);
+      await new Promise(resolve => setTimeout(resolve, FIRST_MESSAGE_DELAY_MS));
+      this.isFirstInteraction = false;
+    }
 
-    await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
-      method: 'POST',
-      headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
-    });
+    try {
+      console.log(`🔊 Generando audio completo...`);
+      
+      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': process.env.ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          model: 'eleven_turbo_v2_5',
+          voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+          optimize_streaming_latency: 4
+        })
+      });
+
+      if (!audioResp.ok) throw new Error(`ElevenLabs: ${audioResp.status}`);
+      
+      const arrayBuffer = await audioResp.arrayBuffer();
+      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+
+      // Enviamos el paquete único a Recall
+      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
+        method: 'POST',
+        headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
+      });
+      
+      console.log(`✅ Audio enviado.`);
+
+    } catch (e) {
+      console.error('Error Audio:', e.message);
+    }
   }
 }
 
@@ -290,11 +219,13 @@ wss.on('connection', async (ws, req) => {
         const words = msg.data.data?.words || [];
         
         if (words.length > 0) {
+          // 🛑 SI EL USUARIO HABLA, CORTAMOS TODO
           if (streamManager) streamManager.stop();
-
+          
           if (silenceTimer) clearTimeout(silenceTimer);
           words.forEach(w => currentUtterance.push(w.text));
 
+          // Esperamos silencio para confirmar fin de frase
           silenceTimer = setTimeout(() => {
             if (currentUtterance.length > 0 && streamManager) {
               const fullText = currentUtterance.join(' ');
@@ -318,7 +249,7 @@ wss.on('connection', async (ws, req) => {
 // 4. HTTP
 // ════════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.send('Recall Engine v5.0 (Stable)'));
+app.get('/', (req, res) => res.send('Single Shot Core v6.0'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
 
 server.on('upgrade', (req, socket, head) => {
