@@ -1,390 +1,204 @@
-const WebSocket = require('ws');
-const { createClient } = require('@supabase/supabase-js');
-const { ThinkingAgent } = require('./thinking-agent');
-
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
-
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const RECALL_API_KEY = process.env.RECALL_API_KEY;
-const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
-const wss = new WebSocket.Server({ port: 8080 });
-
-console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
-
-async function loadActiveAgent(agentName = null) {
-  try {
-    console.log('📥 Cargando configuración del agente desde la base de datos...');
-
-    let query = supabase
-      .from('agents')
-      .select(`
-        *,
-        agent_voice_config (*)
-      `)
-      .eq('is_active', true);
-
-    if (agentName) {
-      query = query.eq('name', agentName.toLowerCase());
-      console.log(`   🔍 Buscando agente: ${agentName}`);
-    } else {
-      query = query.eq('is_default', true);
-      console.log('   🔍 Buscando agente por defecto');
-    }
-
-    const { data: agent, error } = await query.single();
-
-    if (error || !agent) {
-      console.error('❌ Error cargando agente:', error);
-      throw new Error(`No se pudo cargar el agente${agentName ? ` "${agentName}"` : ' por defecto'}`);
-    }
-
-    if (!agent.agent_voice_config || agent.agent_voice_config.length === 0) {
-      throw new Error(`El agente ${agent.name} no tiene configuración de voz`);
-    }
-
-    const voiceConfig = agent.agent_voice_config.find(v => v.is_active);
-
-    if (!voiceConfig) {
-      throw new Error(`El agente ${agent.name} no tiene una voz activa`);
-    }
-
-    console.log(`✅ Agente cargado exitosamente:`);
-    console.log(`   👤 Nombre: ${agent.display_name}`);
-    console.log(`   🎭 Tipo: ${agent.agent_type}`);
-    console.log(`   🗣️  Voz: ${voiceConfig.voice_name}`);
-    console.log(`   🌍 Idioma: ${agent.language}`);
-    console.log(`   📍 Ubicación: ${agent.city}, ${agent.country}`);
-    console.log(`   🤖 Modelo LLM: ${agent.llm_model}`);
-    console.log(`   ⏱️  Timeouts: silence=${agent.silence_timeout_ms}ms, conversation=${agent.conversation_timeout_ms}ms`);
-
-    return {
-      agent,
-      voiceConfig
-    };
-
-  } catch (error) {
-    console.error('❌ Error en loadActiveAgent:', error.message);
-    throw error;
-  }
-}
-
-wss.on('connection', async function connection(ws, req) {
-  const clientIp = req.socket.remoteAddress;
-  console.log(`\n✅ Nueva conexión WebSocket desde: ${clientIp}`);
-
-  let agentConfig;
-  try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const agentName = url.searchParams.get('agent');
+/**
+ * 🧠 AGENTE PENSANTE - Evalúa la reunión en tiempo real
+ * Este agente piensa continuamente sobre lo que está pasando
+ */
+class ThinkingAgent {
+  constructor(meetingId, agentConfig) {
+    this.meetingId = meetingId;
+    this.agent = agentConfig.agent;
+    this.conversationBuffer = [];
+    this.thinkingHistory = [];
+    this.lastThinkingTime = 0;
+    this.thinkingCooldown = 20000; // Pensar cada 20 segundos
+    this.speakerStats = new Map();
+    this.meetingStartTime = Date.now();
     
-    agentConfig = await loadActiveAgent(agentName);
-  } catch (error) {
-    console.error('❌ No se pudo cargar el agente, cerrando conexión');
-    ws.close(1011, 'No se pudo cargar configuración del agente');
-    return;
+    console.log('\n🧠═══════════════════════════════════════════════════════');
+    console.log('🧠 AGENTE PENSANTE ACTIVADO');
+    console.log('🧠 Voy a estar pensando y evaluando la reunión en tiempo real');
+    console.log('🧠═══════════════════════════════════════════════════════\n');
   }
 
-  const { agent, voiceConfig } = agentConfig;
-
-  // 🧠 INICIALIZAR AGENTE PENSANTE
-  const meetingId = `meeting_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const thinkingAgent = new ThinkingAgent(meetingId, agentConfig);
-
-  const AGENT_PROFILE = agent.profile_text;
-  const SILENCE_TIMEOUT = agent.silence_timeout_ms;
-  const CONVERSATION_TIMEOUT = agent.conversation_timeout_ms;
-  const AUDIO_COOLDOWN = agent.audio_cooldown_ms;
-  const FIRST_MESSAGE_SILENCE = agent.first_message_silence_seconds;
-  const CONTEXT_HISTORY_LENGTH = agent.llm_context_history_length;
-  
-  const VOICE_ID = voiceConfig.voice_id;
-  const VOICE_MODEL = voiceConfig.voice_model;
-  const VOICE_SETTINGS = voiceConfig.voice_settings;
-
-  let currentUtterance = [];
-  let silenceTimeoutId = null;
-  let conversationTimeoutId = null;
-  let lastSpeaker = null;
-  let botId = null;
-  let conversationHistory = [];
-  
-  let uniqueSpeakers = new Set();
-  let isAgentSpeaking = false;
-  let isAgentActive = false;
-  let lastAgentResponseTime = 0;
-  let isProcessing = false;
-  let lastWordTime = 0;
-  let isFirstMessage = true;
-  let conversationTimeoutStartTime = 0;
-  let userIsCurrentlySpeaking = false;
-
-  console.log(`\n🎙️ ${agent.display_name} está listo y escuchando...\n`);
-
-  async function generateElevenLabsAudio(text, addInitialSilence = false) {
+  /**
+   * Procesa cada utterance de la reunión
+   */
+  async processUtterance(fullText, metadata) {
     try {
-      console.log(`🎙️ Generando audio con ${voiceConfig.voice_name}...`);
-      
-      let finalText = text;
-      if (addInitialSilence) {
-        finalText = `<break time="${FIRST_MESSAGE_SILENCE}s"/> ${text}`;
-        console.log(`🔇 Agregando ${FIRST_MESSAGE_SILENCE}s de silencio inicial (primer mensaje)`);
-      }
-      
-      console.log(`📝 Texto: "${finalText}"`);
+      const { speakerName, speakerId, isAgentSpeaking } = metadata;
 
-      const startTime = Date.now();
-
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
-        method: 'POST',
-        headers: {
-          'Accept': 'audio/mpeg',
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text: finalText,
-          model_id: VOICE_MODEL,
-          voice_settings: VOICE_SETTINGS
-        })
+      // Agregar al buffer
+      this.conversationBuffer.push({
+        speaker: speakerName,
+        text: fullText,
+        timestamp: Date.now(),
+        isAgent: isAgentSpeaking
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
+      // Actualizar estadísticas
+      this.updateStats(speakerId, speakerName, fullText);
+
+      // Análisis inmediato de lo que acaba de pasar
+      this.quickThink(fullText, speakerName, isAgentSpeaking);
+
+      // Limitar buffer
+      if (this.conversationBuffer.length > 30) {
+        this.conversationBuffer.shift();
       }
 
-      const audioBuffer = await response.arrayBuffer();
-      const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
-
-      const duration = Date.now() - startTime;
-      console.log(`✅ Audio generado en ${duration}ms: ${mp3Base64.length} caracteres`);
-      
-      return mp3Base64;
+      // Pensar profundamente si es el momento
+      if (this.shouldThinkNow()) {
+        await this.deepThink();
+      }
 
     } catch (error) {
-      console.error('❌ Error generando audio con ElevenLabs:', error.message);
-      throw error;
+      console.error('❌ Error en processUtterance:', error.message);
     }
   }
 
-  async function sendAudioToBot(audioBase64) {
-    if (!botId) {
-      console.error('❌ No hay bot_id disponible para enviar audio');
-      return;
-    }
-
-    try {
-      console.log('🔊 Enviando audio al bot de Recall.ai...');
-      const startTime = Date.now();
-      
-      const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Token ${RECALL_API_KEY}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          kind: 'mp3',
-          b64_data: audioBase64
-        })
+  /**
+   * Actualiza estadísticas de participación
+   */
+  updateStats(speakerId, speakerName, text) {
+    if (!this.speakerStats.has(speakerId)) {
+      this.speakerStats.set(speakerId, {
+        name: speakerName,
+        interventions: 0,
+        totalWords: 0,
+        questions: 0,
+        lastSpoke: 0
       });
+    }
 
-      const duration = Date.now() - startTime;
-
-      if (response.ok) {
-        console.log(`✅ Audio enviado al bot en ${duration}ms`);
-      } else {
-        const error = await response.text();
-        console.error('❌ Error enviando audio al bot:', response.status, error);
-      }
-    } catch (error) {
-      console.error('❌ Error en sendAudioToBot:', error.message);
+    const stats = this.speakerStats.get(speakerId);
+    stats.interventions++;
+    stats.totalWords += text.split(' ').length;
+    stats.lastSpoke = Date.now();
+    
+    if (text.includes('?') || this.hasQuestionPattern(text)) {
+      stats.questions++;
     }
   }
 
-  async function getGPT4Response(userMessage, speakerName) {
-    try {
-      console.log(`🤖 Obteniendo respuesta de ${agent.llm_model}...`);
-      const startTime = Date.now();
+  /**
+   * Pensamiento rápido sobre cada intervención
+   */
+  quickThink(text, speaker, isAgent) {
+    const lowerText = text.toLowerCase();
 
-      const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
+    // Detectar confusión
+    const confusionWords = ['no entiendo', 'no me queda claro', 'confuso', 'no sé', 
+                            'no comprendo', 'no capto', 'perdón', 'cómo', 'qué dijiste'];
+    if (confusionWords.some(word => lowerText.includes(word))) {
+      console.log(`🧠 🤔 [PENSANDO] ${speaker} parece confundido: "${text.substring(0, 60)}..."`);
+      console.log(`🧠    → Puede necesitar aclaración`);
+    }
 
-      conversationHistory.push({
-        role: 'user',
-        content: messageWithSpeaker
-      });
+    // Detectar objeciones
+    const objectionWords = ['pero', 'sin embargo', 'no estoy de acuerdo', 'el problema es',
+                            'no creo que', 'me preocupa', 'no estoy seguro'];
+    if (objectionWords.some(word => lowerText.includes(word))) {
+      console.log(`🧠 ⚠️  [PENSANDO] ${speaker} tiene una objeción: "${text.substring(0, 60)}..."`);
+      console.log(`🧠    → Hay que abordar esta preocupación`);
+    }
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: agent.llm_model,
-          messages: [
-            {
-              role: 'system',
-              content: AGENT_PROFILE
-            },
-            ...conversationHistory
-          ],
-          temperature: agent.llm_temperature,
-          max_tokens: agent.llm_max_tokens,
-          top_p: 1,
-          frequency_penalty: 0,
-          presence_penalty: 0
-        })
-      });
+    // Detectar entusiasmo
+    const enthusiasmWords = ['excelente', 'perfecto', 'genial', 'me encanta', 'buenísimo',
+                             'brillante', 'increíble', 'fantástico', 'dale'];
+    if (enthusiasmWords.some(word => lowerText.includes(word))) {
+      console.log(`🧠 ✨ [PENSANDO] ${speaker} está entusiasmado`);
+    }
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`OpenAI error: ${response.status} - ${error}`);
-      }
+    // Detectar decisiones importantes
+    const decisionWords = ['entonces vamos', 'decidido', 'hagamos', 'acordamos', 'quedamos en'];
+    if (decisionWords.some(word => lowerText.includes(word))) {
+      console.log(`🧠 ⚡ [DECISIÓN] ${speaker}: "${text.substring(0, 70)}..."`);
+    }
 
-      const data = await response.json();
-      const assistantMessage = data.choices[0].message.content;
-
-      conversationHistory.push({
-        role: 'assistant',
-        content: assistantMessage
-      });
-
-      if (conversationHistory.length > CONTEXT_HISTORY_LENGTH) {
-        conversationHistory = conversationHistory.slice(-CONTEXT_HISTORY_LENGTH);
-      }
-
-      const duration = Date.now() - startTime;
-      console.log(`🎯 Respuesta de ${agent.llm_model} en ${duration}ms:`, assistantMessage);
-      
-      return assistantMessage;
-
-    } catch (error) {
-      console.error('❌ Error obteniendo respuesta de GPT:', error.message);
-      throw error;
+    // Detectar preguntas sin responder
+    if (text.includes('?') && !isAgent) {
+      console.log(`🧠 ❓ [PREGUNTA] ${speaker}: "${text.substring(0, 70)}..."`);
+      console.log(`🧠    → Monitoreando si se responde...`);
     }
   }
 
-  function activateConversation() {
-    isAgentActive = true;
-    console.log('🟢 MODO ACTIVO: Agente en conversación');
-    
-    if (conversationTimeoutId) {
-      clearTimeout(conversationTimeoutId);
-      console.log('   ⏱️  Timeout anterior cancelado');
-    }
-    
-    conversationTimeoutStartTime = Date.now();
-    
-    conversationTimeoutId = setTimeout(() => {
-      const elapsed = Date.now() - conversationTimeoutStartTime;
-      console.log(`🔴 MODO PASIVO: Conversación terminada por inactividad (${elapsed}ms transcurridos)`);
-      isAgentActive = false;
-      conversationTimeoutId = null;
-    }, CONVERSATION_TIMEOUT);
-    
-    console.log(`   ⏰ Nuevo timeout de conversación: ${CONVERSATION_TIMEOUT/1000}s`);
-  }
-
-  function cancelConversationTimeout() {
-    if (conversationTimeoutId) {
-      const elapsed = Date.now() - conversationTimeoutStartTime;
-      clearTimeout(conversationTimeoutId);
-      conversationTimeoutId = null;
-      console.log(`⏸️  Timeout CANCELADO (había transcurrido ${elapsed}ms de ${CONVERSATION_TIMEOUT}ms)`);
-    }
-  }
-
-  function canAgentRespond() {
+  /**
+   * Decide si es momento de pensar profundamente
+   */
+  shouldThinkNow() {
     const now = Date.now();
-    const timeSinceLastResponse = now - lastAgentResponseTime;
-    
-    if (isAgentSpeaking) {
-      console.log('⏸️  El agente está hablando actualmente');
+    const timeSinceLastThinking = now - this.lastThinkingTime;
+
+    if (timeSinceLastThinking < this.thinkingCooldown) {
       return false;
     }
-    
-    if (isProcessing) {
-      console.log('⏸️  Ya se está procesando una respuesta');
+
+    if (this.conversationBuffer.length < 3) {
       return false;
     }
-    
-    if (timeSinceLastResponse < AUDIO_COOLDOWN) {
-      const remainingTime = Math.ceil((AUDIO_COOLDOWN - timeSinceLastResponse) / 1000);
-      console.log(`⏸️  Cooldown activo: esperando ${remainingTime}s más`);
-      return false;
-    }
-    
+
     return true;
   }
 
-  async function shouldAgentRespond(text, speakerName) {
-    if (isAgentActive) {
-      console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
-      return true;
-    }
-    
-    console.log('👂 MODO PASIVO: La IA decidirá si debe responder...');
-    
-    // Usar IA para decidir si debe responder
-    const shouldRespond = await aiDecideShouldRespond(text, speakerName);
-    
-    if (shouldRespond) {
-      console.log('🔔 IA decidió que debe responder');
-      console.log('🎯 Activando conversación...');
-      activateConversation();
-      return true;
-    }
-    
-    console.log('⏭️  IA decidió no responder');
-    return false;
-  }
-
-  async function aiDecideShouldRespond(text, speakerName) {
+  /**
+   * Pensamiento profundo - Evalúa el estado de la reunión
+   */
+  async deepThink() {
     try {
-      console.log('🤖 Consultando a la IA si debe responder...');
+      const elapsed = Math.floor((Date.now() - this.meetingStartTime) / 60000);
       
-      // Contexto reciente de la conversación
-      const recentContext = conversationHistory.slice(-6).map(msg => {
-        return `${msg.role === 'user' ? '[Usuario]' : '[' + agent.display_name + ']'}: ${msg.content}`;
-      }).join('\n');
+      console.log('\n🧠╔════════════════════════════════════════════════════════════╗');
+      console.log('🧠║              EVALUANDO LA REUNIÓN...                       ║');
+      console.log('🧠╚════════════════════════════════════════════════════════════╝');
+      console.log(`🧠 ⏱️  Llevamos ${elapsed} minutos`);
+      console.log(`🧠 💬 Analizando últimas ${this.conversationBuffer.length} intervenciones\n`);
+      
+      this.lastThinkingTime = Date.now();
 
-      const prompt = `Sos ${agent.display_name}, un agente de IA en una reunión. 
+      // Preparar contexto
+      const conversationText = this.conversationBuffer
+        .map(msg => `${msg.speaker}: ${msg.text}`)
+        .join('\n');
 
-TU PERFIL:
-${AGENT_PROFILE.substring(0, 500)}
+      // Incluir pensamientos previos para continuidad
+      const previousThoughts = this.thinkingHistory.slice(-3)
+        .map(t => `- ${t.mainInsight}`)
+        .join('\n');
 
-CONTEXTO RECIENTE DE LA CONVERSACIÓN:
-${recentContext || 'No hay contexto previo'}
+      const evaluationPrompt = `Sos un analista experto de reuniones. Estás evaluando esta reunión EN TIEMPO REAL.
 
-NUEVA INTERVENCIÓN:
-${speakerName} dice: "${text}"
+CONTEXTO:
+- Duración actual: ${elapsed} minutos
+- Participantes: ${this.speakerStats.size}
 
-PREGUNTA: ¿Debés responder a esto?
+${previousThoughts ? `MIS PENSAMIENTOS PREVIOS:\n${previousThoughts}\n` : ''}
 
-Respondé "SI" si:
-- Te están hablando directamente (mencionan tu nombre)
-- Te hicieron una pregunta (directa o indirecta)
-- Hay algo que debas aclarar o agregar según tu rol
-- Dijiste algo y están respondiendo a eso
-- Hay una pausa que espera tu respuesta
-- Es tu turno natural en la conversación
+CONVERSACIÓN RECIENTE:
+${conversationText}
 
-Respondé "NO" si:
-- Están hablando entre ellos sin dirigirse a vos
-- Es un comentario que no requiere tu input
-- Ya respondiste y están procesando
-- No sos necesario en este momento
+Tu tarea es PENSAR y EVALUAR como un observador experto. Necesito que:
 
-Responde SOLO con un JSON:
+1. **¿Qué está pasando REALMENTE ahora?** (no solo el tema, sino la dinámica)
+2. **¿Cómo está la energía?** (comprometida, dispersa, tensa, productiva)
+3. **¿Están avanzando o dando vueltas?**
+4. **¿Hay alguien que no está participando o se lo está perdiendo?**
+5. **¿Hay señales de confusión, frustración o desacuerdo no expresado?**
+6. **¿Qué necesita esta reunión AHORA mismo?**
+7. **¿Cuál es tu lectura de la situación?** (insight principal)
+
+Sé directo y honesto. Como si estuvieras pensando en voz alta mientras observás.
+
+Responde en JSON:
 {
-  "should_respond": true/false,
-  "reason": "explicación breve de por qué sí o no"
+  "situationAnalysis": "qué está pasando realmente (2-3 oraciones directas)",
+  "energyLevel": "alta|media|baja|dispersa|tensa",
+  "progressStatus": "avanzando|estancado|dando_vueltas|productivo",
+  "participationIssues": "descripción de problemas de participación o null",
+  "underlyingTension": "tensión o problema no expresado o null",
+  "whatThisMeetingNeedsNow": "qué necesita la reunión ahora mismo",
+  "mainInsight": "tu principal insight/lectura de la situación",
+  "concernLevel": "bajo|medio|alto - qué tan preocupante es lo que ves"
 }`;
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -394,413 +208,274 @@ Responde SOLO con un JSON:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
+          model: 'gpt-4o',
           messages: [
             {
               role: 'system',
-              content: 'Eres un asistente que decide si un agente de IA debe responder. Respondes SOLO en JSON válido.'
+              content: 'Eres un analista experto que piensa en voz alta mientras observa reuniones. Eres directo, perspicaz y honesto. Respondes en JSON válido.'
             },
             {
               role: 'user',
-              content: prompt
+              content: evaluationPrompt
             }
           ],
-          temperature: 0.3,
-          max_tokens: 150,
+          temperature: 0.8,
           response_format: { type: "json_object" }
         })
       });
 
       if (!response.ok) {
-        console.error('❌ Error en IA decision, usando fallback');
-        return detectAgentMentionOrQuestion(text); // Fallback a triggers
+        throw new Error(`OpenAI error: ${response.status}`);
       }
 
       const data = await response.json();
-      const decision = JSON.parse(data.choices[0].message.content);
-      
-      console.log(`🤖 Decisión de IA: ${decision.should_respond ? 'RESPONDER' : 'NO RESPONDER'}`);
-      console.log(`   Razón: ${decision.reason}`);
+      const evaluation = JSON.parse(data.choices[0].message.content);
 
-      return decision.should_respond;
+      // Guardar en historial
+      this.thinkingHistory.push({
+        timestamp: Date.now(),
+        ...evaluation
+      });
+
+      // Mostrar la evaluación
+      this.displayEvaluation(evaluation);
+
+      return evaluation;
 
     } catch (error) {
-      console.error('❌ Error en aiDecideShouldRespond:', error.message);
-      // Fallback a detección de triggers si falla la IA
-      return detectAgentMentionOrQuestion(text);
+      console.error('🧠 ❌ Error pensando:', error.message);
+      return null;
     }
   }
 
-  function detectAgentMentionOrQuestion(text) {
-    function normalizeText(str) {
-      return str
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
+  /**
+   * Muestra la evaluación en el log de forma clara
+   */
+  displayEvaluation(evaluation) {
+    console.log('🧠');
+    console.log('🧠 💭 MI EVALUACIÓN:');
+    console.log(`🧠 ${evaluation.situationAnalysis}`);
+    console.log('🧠');
+    
+    // Emoji según energía
+    const energyEmoji = {
+      'alta': '⚡',
+      'media': '📊',
+      'baja': '😴',
+      'dispersa': '💭',
+      'tensa': '😰'
+    };
+    console.log(`🧠 ${energyEmoji[evaluation.energyLevel] || '📊'} ENERGÍA: ${evaluation.energyLevel.toUpperCase()}`);
+    
+    // Emoji según progreso
+    const progressEmoji = {
+      'avanzando': '🚀',
+      'estancado': '🛑',
+      'dando_vueltas': '🔄',
+      'productivo': '✅'
+    };
+    console.log(`🧠 ${progressEmoji[evaluation.progressStatus] || '📊'} PROGRESO: ${evaluation.progressStatus.replace('_', ' ').toUpperCase()}`);
+    console.log('🧠');
+
+    if (evaluation.participationIssues) {
+      console.log(`🧠 👥 PARTICIPACIÓN:`);
+      console.log(`🧠    ${evaluation.participationIssues}`);
+      console.log('🧠');
     }
 
-    const normalizedText = normalizeText(text);
+    if (evaluation.underlyingTension) {
+      console.log(`🧠 ⚠️  TENSIÓN DETECTADA:`);
+      console.log(`🧠    ${evaluation.underlyingTension}`);
+      console.log('🧠');
+    }
+
+    console.log(`🧠 💡 LO QUE NECESITA ESTA REUNIÓN AHORA:`);
+    console.log(`🧠    ${evaluation.whatThisMeetingNeedsNow}`);
+    console.log('🧠');
+
+    console.log(`🧠 🎯 INSIGHT PRINCIPAL:`);
+    console.log(`🧠    ${evaluation.mainInsight}`);
+    console.log('🧠');
+
+    // Nivel de preocupación con colores
+    const concernEmoji = {
+      'bajo': '🟢',
+      'medio': '🟡',
+      'alto': '🔴'
+    };
+    console.log(`🧠 ${concernEmoji[evaluation.concernLevel] || '🟡'} NIVEL DE PREOCUPACIÓN: ${evaluation.concernLevel.toUpperCase()}`);
     
-    const agentNameVariations = [
-      normalizeText(agent.name),
-      normalizeText(agent.display_name)
+    // Estadísticas de participación
+    console.log('🧠');
+    console.log('🧠 📊 PARTICIPACIÓN:');
+    for (const [id, stats] of this.speakerStats.entries()) {
+      const avgWords = Math.round(stats.totalWords / stats.interventions);
+      const timeSinceSpoke = Math.floor((Date.now() - stats.lastSpoke) / 1000);
+      console.log(`🧠    👤 ${stats.name}: ${stats.interventions} intervenciones, ${avgWords} palabras/promedio`);
+      if (timeSinceSpoke > 120 && stats.interventions > 0) {
+        console.log(`🧠       ⚠️  No habla hace ${Math.floor(timeSinceSpoke/60)} minutos`);
+      }
+    }
+    
+    console.log('🧠╚════════════════════════════════════════════════════════════╝\n');
+  }
+
+  /**
+   * Detecta patrones de pregunta
+   */
+  hasQuestionPattern(text) {
+    const questionWords = [
+      'qué', 'quién', 'cómo', 'cuándo', 'dónde', 'por qué', 'cuál',
+      'que', 'quien', 'como', 'cuando', 'donde', 'porque', 'cual',
+      'podés', 'podes', 'podría', 'podrias'
     ];
     
-    const mentionedByName = agentNameVariations.some(name => 
-      normalizedText.includes(name)
-    );
-    
-    if (mentionedByName) {
-      console.log(`   → Mención de "${agent.name}"`);
-      return true;
-    }
-    
-    let questionPhrases = [];
-    
-    if (agent.language.startsWith('es')) {
-      questionPhrases = [
-        'me gustaria saber', 'me gustaria que', 'quisiera saber',
-        'podrias decirme', 'podrias explicarme', 'podrias contarme',
-        'puedes decirme', 'puedes explicarme', 'puedes contarme',
-        'necesito saber', 'quiero saber', 'quiero que me',
-        'tengo una pregunta', 'una pregunta', 'consulta',
-        'ayudame con', 'ayudame a', 'necesito ayuda'
-      ];
-    } else if (agent.language.startsWith('en')) {
-      questionPhrases = [
-        'i would like to know', 'could you tell me', 'could you explain',
-        'can you tell me', 'can you explain', 'i want to know',
-        'i need to know', 'i have a question', 'help me with'
-      ];
-    }
-    
-    const hasQuestionPhrase = questionPhrases.some(phrase => 
-      normalizedText.includes(phrase)
-    );
-    
-    if (hasQuestionPhrase) {
-      console.log('   → Frase de pregunta indirecta detectada');
-      return true;
-    }
-    
-    if (agent.language.startsWith('es')) {
-      const siConditionalPattern = /\b(si|s)\s+\w+\s+(puede|pueden|es|son|esta|hay|tiene|funciona)/;
-      if (siConditionalPattern.test(normalizedText)) {
-        console.log('   → Pregunta condicional con "si" detectada');
-        return true;
-      }
-    }
-    
-    let questionWords = [];
-    
-    if (agent.language.startsWith('es')) {
-      questionWords = [
-        'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
-        'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
-        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
-      ];
-    } else if (agent.language.startsWith('en')) {
-      questionWords = [
-        'what', 'who', 'how', 'when', 'where', 'why', 'which', 'if'
-      ];
-    }
-    
-    const normalizedQuestionWords = questionWords.map(w => normalizeText(w));
-    
-    const hasQuestionWord = normalizedQuestionWords.some(word => {
-      const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
-      return regex.test(normalizedText);
+    const lowerText = text.toLowerCase();
+    return questionWords.some(word => {
+      const regex = new RegExp(`\\b${word}\\b`);
+      return regex.test(lowerText);
     });
-    
-    const hasQuestionMark = text.includes('?');
-    
-    if (hasQuestionWord || hasQuestionMark) {
-      console.log('   → Pregunta detectada (palabra interrogativa o ?)');
-      return true;
-    }
-    
-    return false;
   }
 
-  function isEndOfSentence(text) {
-    const trimmed = text.trim();
-    
-    const endsWithPunctuation = /[.!?]$/.test(trimmed);
-    
-    let conversationalEndings = [];
-    
-    if (agent.language.startsWith('es')) {
-      conversationalEndings = [
-        /\bdale$/i, /\bbueno$/i, /\bok$/i, /\bjoya$/i,
-        /\bperfecto$/i, /\bbárbaro$/i, /\bgenial$/i,
-        /\bclaro$/i, /\bexacto$/i, /\bsí$/i, /\bno$/i,
-        /\bgracias$/i, /\bchau$/i, /\bhola$/i
-      ];
-    } else if (agent.language.startsWith('en')) {
-      conversationalEndings = [
-        /\bokay$/i, /\bok$/i, /\balright$/i, /\bgreat$/i,
-        /\bperfect$/i, /\bsure$/i, /\byes$/i, /\bno$/i,
-        /\bthanks$/i, /\bbye$/i, /\bhello$/i, /\bhi$/i
-      ];
-    }
-    
-    const hasConversationalEnding = conversationalEndings.some(pattern => 
-      pattern.test(trimmed)
-    );
-    
-    const hasCompleteThought = trimmed.split(' ').length >= 3;
-    
-    const isShortValidResponse = trimmed.split(' ').length <= 5 && (
-      endsWithPunctuation || hasConversationalEnding
-    );
-    
-    const isComplete = endsWithPunctuation || 
-                      hasConversationalEnding || 
-                      (hasCompleteThought && trimmed.length > 15) ||
-                      isShortValidResponse;
-    
-    return isComplete;
+  /**
+   * Obtiene un resumen del estado actual
+   */
+  getCurrentState() {
+    const lastThought = this.thinkingHistory[this.thinkingHistory.length - 1];
+    const elapsed = Math.floor((Date.now() - this.meetingStartTime) / 60000);
+
+    return {
+      duration: elapsed,
+      totalSpeakers: this.speakerStats.size,
+      totalInterventions: this.conversationBuffer.length,
+      lastEvaluation: lastThought ? {
+        energy: lastThought.energyLevel,
+        progress: lastThought.progressStatus,
+        concern: lastThought.concernLevel,
+        insight: lastThought.mainInsight
+      } : null
+    };
   }
 
-  async function sendToAgent(text, speakerName) {
-    if (!canAgentRespond()) {
-      return;
-    }
-
+  /**
+   * Genera evaluación final (llamar al cerrar la conexión)
+   */
+  async getFinalThoughts() {
     try {
-      isProcessing = true;
-      isAgentSpeaking = true;
+      const elapsed = Math.floor((Date.now() - this.meetingStartTime) / 60000);
       
-      console.log(`\n📤 Procesando mensaje para ${agent.name}`);
-      console.log(`   👤 De: ${speakerName}`);
-      console.log(`   💬 Mensaje: ${text}`);
-      console.log(`   🎬 Primer mensaje: ${isFirstMessage ? 'SÍ' : 'NO'}`);
-      const totalStartTime = Date.now();
+      console.log('\n🧠╔════════════════════════════════════════════════════════════╗');
+      console.log('🧠║            MIS PENSAMIENTOS FINALES                        ║');
+      console.log('🧠╚════════════════════════════════════════════════════════════╝');
+      console.log(`🧠 📊 Reunión de ${elapsed} minutos observada\n`);
 
-      const responseText = await getGPT4Response(text, speakerName);
-      const audioBase64 = await generateElevenLabsAudio(responseText, isFirstMessage);
-      await sendAudioToBot(audioBase64);
+      // Resumen de mis pensamientos durante la reunión
+      console.log('🧠 🧵 EVOLUCIÓN DE MIS PENSAMIENTOS:');
+      this.thinkingHistory.forEach((thought, i) => {
+        const minuteMark = Math.floor((thought.timestamp - this.meetingStartTime) / 60000);
+        console.log(`🧠 [Min ${minuteMark}] ${thought.mainInsight}`);
+      });
+      console.log('🧠');
 
-      // 🧠 NOTIFICAR AL AGENTE PENSANTE
-      await thinkingAgent.processUtterance(responseText, {
-        speakerName: agent.display_name,
-        speakerId: 'agent',
-        isAgentSpeaking: true
+      // Evaluación final más profunda
+      const allConversation = this.conversationBuffer
+        .map(msg => `${msg.speaker}: ${msg.text}`)
+        .join('\n');
+
+      const finalPrompt = `Has estado observando esta reunión de ${elapsed} minutos. 
+
+Tus pensamientos durante la reunión fueron:
+${this.thinkingHistory.map((t, i) => `${i+1}. ${t.mainInsight}`).join('\n')}
+
+CONVERSACIÓN COMPLETA:
+${allConversation}
+
+Ahora que terminó, dame tu evaluación final como analista experto:
+
+1. ¿Fue productiva esta reunión? ¿Por qué?
+2. ¿Qué funcionó bien?
+3. ¿Qué no funcionó?
+4. ¿Hay algo que quedó sin resolver?
+5. ¿Qué recomendás para la próxima?
+
+Sé honesto y directo. JSON:
+{
+  "overallAssessment": "evaluación general (3-4 oraciones)",
+  "wasProductive": true/false,
+  "whyProductive": "explicación",
+  "whatWorked": ["punto1", "punto2"],
+  "whatDidntWork": ["punto1", "punto2"],
+  "unresolved": ["punto1", "punto2"],
+  "recommendations": ["recomendación1", "recomendación2"],
+  "rating": 1-10,
+  "oneLineVerdict": "tu veredicto en una línea"
+}`;
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: 'Eres un analista experto que da feedback honesto sobre reuniones.' },
+            { role: 'user', content: finalPrompt }
+          ],
+          temperature: 0.7,
+          response_format: { type: "json_object" }
+        })
       });
 
-      if (isFirstMessage) {
-        isFirstMessage = false;
-        console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
+      const data = await response.json();
+      const final = JSON.parse(data.choices[0].message.content);
+
+      // Mostrar evaluación final
+      console.log('🧠 🎯 EVALUACIÓN FINAL:');
+      console.log(`🧠 ${final.overallAssessment}`);
+      console.log('🧠');
+      console.log(`🧠 ${final.wasProductive ? '✅' : '❌'} ¿Productiva? ${final.wasProductive ? 'SÍ' : 'NO'}`);
+      console.log(`🧠    ${final.whyProductive}`);
+      console.log('🧠');
+
+      if (final.whatWorked.length > 0) {
+        console.log('🧠 ✅ QUÉ FUNCIONÓ:');
+        final.whatWorked.forEach(item => console.log(`🧠    • ${item}`));
+        console.log('🧠');
       }
 
-      lastAgentResponseTime = Date.now();
+      if (final.whatDidntWork.length > 0) {
+        console.log('🧠 ❌ QUÉ NO FUNCIONÓ:');
+        final.whatDidntWork.forEach(item => console.log(`🧠    • ${item}`));
+        console.log('🧠');
+      }
 
-      const totalDuration = Date.now() - totalStartTime;
-      console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
-      console.log(`⏰ Cooldown activado por ${AUDIO_COOLDOWN/1000}s`);
+      if (final.unresolved.length > 0) {
+        console.log('🧠 ⚠️  QUEDÓ SIN RESOLVER:');
+        final.unresolved.forEach(item => console.log(`🧠    • ${item}`));
+        console.log('🧠');
+      }
+
+      if (final.recommendations.length > 0) {
+        console.log('🧠 💡 RECOMENDACIONES:');
+        final.recommendations.forEach(item => console.log(`🧠    • ${item}`));
+        console.log('🧠');
+      }
+
+      console.log(`🧠 ⭐ RATING: ${final.rating}/10`);
+      console.log('🧠');
+      console.log(`🧠 📝 VEREDICTO:`);
+      console.log(`🧠    "${final.oneLineVerdict}"`);
+      console.log('🧠╚════════════════════════════════════════════════════════════╝\n');
+
+      return final;
 
     } catch (error) {
-      console.error('❌ Error en sendToAgent:', error.message);
-    } finally {
-      isProcessing = false;
-      
-      setTimeout(() => {
-        isAgentSpeaking = false;
-        console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
-      }, 2000);
+      console.error('🧠 ❌ Error en pensamientos finales:', error.message);
+      return null;
     }
   }
+}
 
-  async function processCompleteUtterance() {
-    if (isProcessing) {
-      console.log('⏭️  Ya hay un procesamiento en curso, ignorando utterance completo');
-      return;
-    }
-
-    if (currentUtterance.length === 0) return;
-
-    try {
-      const fullText = currentUtterance.map(word => word.text).join(' ');
-      const speaker = currentUtterance[0].speaker;
-      const speakerName = currentUtterance[0].speakerName;
-      const startTime = currentUtterance[0].start_time;
-      const endTime = currentUtterance[currentUtterance.length - 1].end_time;
-      const wordCount = currentUtterance.length;
-
-      console.log('\n💾 PROCESANDO TRANSCRIPT COMPLETO:');
-      console.log(`   👤 Speaker: ${speakerName} (${speaker})`);
-      console.log(`   📝 Texto: "${fullText}"`);
-      console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
-      console.log(`   📊 Palabras: ${wordCount}`);
-      console.log(`   👥 Total speakers: ${uniqueSpeakers.size}`);
-      console.log(`   🎯 Estado: ${isAgentActive ? 'ACTIVO' : 'PASIVO'}`);
-      
-      const isComplete = isEndOfSentence(fullText);
-      console.log(`   ✅ Frase completa: ${isComplete ? 'Sí' : 'No'}`);
-
-      const hasMinimumWords = wordCount >= 2;
-      const shouldProcess = isComplete || hasMinimumWords;
-
-      if (!shouldProcess) {
-        console.log('⏭️  Esperando más contenido (muy corto)');
-        return;
-      }
-
-      userIsCurrentlySpeaking = false;
-
-      // 🧠 ENVIAR AL AGENTE PENSANTE
-      await thinkingAgent.processUtterance(fullText, {
-        speakerName,
-        speakerId: speaker,
-        isAgentSpeaking: false
-      });
-
-      if (await shouldAgentRespond(fullText, speakerName)) {
-        console.log('🎯 ¡Respuesta activada! Procesando...');
-        await sendToAgent(fullText, speakerName);
-      } else {
-        console.log('⏭️  No se debe responder');
-      }
-
-      currentUtterance = [];
-
-    } catch (error) {
-      console.error('❌ Error en processCompleteUtterance:', error.message);
-    }
-  }
-
-  ws.on('message', async function incoming(message) {
-    try {
-      const data = JSON.parse(message);
-      
-      if (data.event === 'transcript.data') {
-        const words = data.data?.data?.words;
-        const participant = data.data?.data?.participant;
-        
-        if (!botId && data.data?.bot?.id) {
-          botId = data.data.bot.id;
-          console.log(`🤖 Bot ID capturado: ${botId}`);
-        }
-
-        if (words && words.length > 0 && participant) {
-          lastWordTime = Date.now();
-          
-          if (!userIsCurrentlySpeaking) {
-            userIsCurrentlySpeaking = true;
-            console.log('🗣️  Usuario comenzó a hablar');
-          }
-          
-          if (isAgentActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
-            cancelConversationTimeout();
-          }
-          
-          console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
-
-          const speakerId = participant.id;
-          const speakerName = participant.name || `Speaker ${speakerId}`;
-          
-          uniqueSpeakers.add(speakerId);
-
-          if (lastSpeaker !== null && lastSpeaker !== speakerId) {
-            console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
-            
-            if (isProcessing) {
-              console.log('⏭️  Ya hay un procesamiento en curso, ignorando cambio de speaker');
-            } else {
-              await processCompleteUtterance();
-            }
-          }
-
-          words.forEach(word => {
-            const text = word.text || '';
-            if (text.trim()) {
-              currentUtterance.push({
-                text: text,
-                speaker: speakerId,
-                speakerName: speakerName,
-                start_time: word.start_timestamp?.relative || 0,
-                end_time: word.end_timestamp?.relative || 0
-              });
-            }
-          });
-
-          lastSpeaker = speakerId;
-
-          if (silenceTimeoutId) {
-            clearTimeout(silenceTimeoutId);
-          }
-
-          silenceTimeoutId = setTimeout(async () => {
-            if (isProcessing) {
-              console.log('⏭️  Procesamiento en curso, posponer timeout de silencio');
-              if (silenceTimeoutId) {
-                clearTimeout(silenceTimeoutId);
-              }
-              silenceTimeoutId = setTimeout(async () => {
-                const timeSinceLastWord = Date.now() - lastWordTime;
-                console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
-                await processCompleteUtterance();
-              }, SILENCE_TIMEOUT);
-              return;
-            }
-            
-            const timeSinceLastWord = Date.now() - lastWordTime;
-            console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
-            await processCompleteUtterance();
-          }, SILENCE_TIMEOUT);
-
-          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
-        }
-      } else if (data.event === 'transcript.partial_data') {
-        console.log('   ⏭️  Ignorando partial_data');
-      }
-      
-    } catch (e) {
-      console.error('❌ Error procesando mensaje:', e.message);
-    }
-  });
-
-  ws.on('close', async function close(code, reason) {
-    console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
-    console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
-    
-    // 🧠 OBTENER PENSAMIENTOS FINALES
-    await thinkingAgent.getFinalThoughts();
-    
-    if (currentUtterance.length > 0) {
-      await processCompleteUtterance();
-    }
-    
-    if (silenceTimeoutId) {
-      clearTimeout(silenceTimeoutId);
-    }
-    
-    if (conversationTimeoutId) {
-      clearTimeout(conversationTimeoutId);
-    }
-  });
-
-  ws.on('error', function error(err) {
-    console.error('❌ Error en WebSocket:', err.message);
-  });
-
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    }
-  }, 30000);
-
-  ws.on('close', () => {
-    clearInterval(pingInterval);
-  });
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Error no capturado:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('❌ Promesa rechazada:', reason);
-});
-
-console.log('\n📡 Servidor WebSocket listo - Esperando conexiones...\n');
+module.exports = { ThinkingAgent };
