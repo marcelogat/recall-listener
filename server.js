@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - MODO LÍDER PROACTIVO (Facilitador de Reuniones)
+// server.js - FASE 1: STREAMING REAL & LATENCIA CERO
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,71 +11,70 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// ⚡ CONFIGURACIÓN DE LIDERAZGO
-const AGGRESSIVE_SILENCE_MS = 600; // Tiempo para asumir fin de frase usuario
-const SOCIAL_CHECK_MS = 4000;      // 4s de silencio = El bot toma el mando
+// ⚡ AJUSTE FINO DE TIEMPOS
+// 600ms: El equilibrio perfecto. Menos es interrumpir, más es lag.
+const SILENCE_THRESHOLD_MS = 600; 
 
-console.log('🚀 Servidor WebSocket: MODO LÍDER ACTIVADO');
+console.log('🚀 Servidor WebSocket: STREAMING ARCHITECTURE ONLINE');
 
 // ════════════════════════════════════════════════════════════════
-// 1. SUPABASE
+// 1. SUPABASE (Validación Estricta)
 // ════════════════════════════════════════════════════════════════
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ ERROR: Faltan variables SUPABASE.');
+  console.error('❌ FATAL: Faltan variables de entorno SUPABASE.');
   process.exit(1);
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. CEREBRO LÍDER (Prompt de Conducción)
+// 2. GESTOR DE STREAMING (El Corazón del Sistema)
 // ════════════════════════════════════════════════════════════════
 
-class ThinkingBrain {
-  constructor(agentConfig) {
+class StreamManager {
+  constructor(agentConfig, botId, voiceConfig) {
     this.agentName = agentConfig.name;
     this.agentRole = agentConfig.role;
-    this.conversationHistory = []; 
+    this.botId = botId;
+    this.voiceId = voiceConfig.id;
+    this.conversationHistory = [];
+    this.isSpeaking = false;
   }
 
-  addToHistory(speaker, text) {
-    this.conversationHistory.push({ speaker, text, time: Date.now() });
-    if (this.conversationHistory.length > 20) this.conversationHistory.shift();
+  addToHistory(role, text) {
+    this.conversationHistory.push({ role, content: text });
+    if (this.conversationHistory.length > 12) this.conversationHistory.shift();
   }
 
-  getContext() {
-    return this.conversationHistory.map(m => `[${m.speaker}]: ${m.text}`).join('\n');
+  // Convierte el historial al formato exacto que pide OpenAI
+  getFormattedHistory() {
+    return this.conversationHistory.map(msg => ({
+      role: msg.role === this.agentName ? 'assistant' : 'user',
+      content: msg.content
+    }));
   }
 
-  async decideAndRespond(triggerType, textInput = "") {
-    const context = this.getContext();
-    console.log(`🧠 Liderando (${triggerType})...`);
+  async processUserMessage(userText) {
+    if (!userText.trim()) return;
+    
+    console.log(`📝 Usuario: "${userText}"`);
+    this.addToHistory('user', userText);
+    this.isSpeaking = true;
 
-    // 🧠 EL SECRETO ESTÁ AQUÍ: INSTRUCCIONES DE LIDERAZGO
-    const prompt = `
-Eres ${this.agentName}, actuando como ${this.agentRole}.
-Tu rol NO es solo responder. Tu rol es LIDERAR y FACILITAR la conversación.
-
-HISTORIAL:
-${context}
-
-SITUACIÓN ACTUAL: "${triggerType === 'SILENCE_CHECK' ? '[SILENCIO EN LA SALA - LA REUNIÓN SE ESTANCÓ]' : textInput}"
-
-OBJETIVOS:
-1. NUNCA termines con una respuesta cerrada ("Sí, claro."). SIEMPRE devuelve la pelota ("Sí, claro. ¿Y tú cómo ves ese punto?").
-2. Si el usuario da una respuesta corta, INDAGA MÁS ("¿Podrías darme un ejemplo?", "Cuéntame más sobre eso").
-3. Si hay silencio, PROPÓN un nuevo tema relacionado o haz una pregunta provocadora.
-4. Mantén la energía alta. Eres proactivo/a, no pasivo/a.
-
-FORMATO JSON:
-1. "decision": "SPEAK" (Casi siempre, a menos que te interrumpan) o "WAIT".
-2. "reflex": Reacción inmediata (1-3 palabras) para ganar el turno ("Excelente punto,", "Entiendo,", "A ver...", "Oye,").
-3. "message": El contenido principal + LA PREGUNTA DE CIERRE (Hook).
-
-Ejemplo: {"decision": "SPEAK", "reflex": "Qué interesante,", "message": "coincido totalmente. Ahora bien, ¿cómo crees que esto impacta en el equipo?"}
-`;
+    // PROMPT DE PERSONALIDAD HUMANA
+    const systemPrompt = `
+    Eres ${this.agentName}, ${this.agentRole}.
+    
+    REGLAS DE ORO PARA PARECER HUMANA:
+    1. RESPUESTA INSTANTÁNEA: Empieza tu frase con un conector natural ("A ver...", "Claro,", "Mmh,", "Entiendo,") para ganar tiempo.
+    2. CONCISIÓN EXTREMA: Habla en oraciones cortas. Nada de párrafos largos.
+    3. CERO FORMALIDAD: No uses "Estimado", "Cordialmente", ni listas con viñetas. Habla como en un café.
+    4. FLUJO: Si te preguntan, responde y devuelve una pregunta corta. Si afirman, valida y agrega un dato.
+    
+    Tu objetivo no es ser una enciclopedia, es ser una buena conversadora.
+    `;
 
     try {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -87,32 +86,111 @@ Ejemplo: {"decision": "SPEAK", "reflex": "Qué interesante,", "message": "coinci
         body: JSON.stringify({
           model: 'gpt-4o-mini', 
           messages: [
-            { role: 'system', content: 'Eres un líder de reunión carismático y proactivo.' }, 
-            { role: 'user', content: prompt }
+            { role: 'system', content: systemPrompt },
+            ...this.getFormattedHistory()
           ],
-          temperature: 0.7, // Creatividad para sacar temas
-          max_tokens: 250,
-          response_format: { type: "json_object" }
+          stream: true, // <--- ACTIVAMOS STREAMING
+          temperature: 0.6,
+          max_tokens: 200
         })
       });
 
-      const data = await response.json();
-      return JSON.parse(data.choices[0].message.content);
+      // Procesamiento del Stream de Texto
+      const reader = response.body;
+      let textBuffer = "";
+      let fullResponse = "";
+      let sentenceBuffer = "";
+
+      for await (const chunk of reader) {
+        const chunkString = chunk.toString();
+        const lines = chunkString.split('\n').filter(line => line.trim() !== '');
+
+        for (const line of lines) {
+          if (line.includes('[DONE]')) continue;
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              const content = data.choices[0].delta.content;
+              
+              if (content) {
+                textBuffer += content;
+                sentenceBuffer += content;
+                fullResponse += content;
+
+                // HEURÍSTICA DE CORTE:
+                // Enviamos a audio apenas tenemos un signo de puntuación fuerte
+                // Esto hace que el audio empiece a sonar mientras GPT sigue escribiendo.
+                if (sentenceBuffer.match(/[.,?!;]/) && sentenceBuffer.length > 5) {
+                  console.log(`⚡ Chunk a Audio: "${sentenceBuffer.trim()}"`);
+                  await this.streamAudioChunk(sentenceBuffer);
+                  sentenceBuffer = ""; // Limpiamos buffer parcial
+                }
+              }
+            } catch (e) {
+              // Ignorar errores de parseo en chunks parciales
+            }
+          }
+        }
+      }
+
+      // Enviar lo que haya quedado en el buffer final
+      if (sentenceBuffer.trim().length > 0) {
+        await this.streamAudioChunk(sentenceBuffer);
+      }
+
+      // Guardamos la respuesta completa en la memoria
+      this.addToHistory(this.agentName, fullResponse);
+      this.isSpeaking = false;
+      console.log('✅ Respuesta completada.');
 
     } catch (error) {
-      console.error('❌ Err cerebro:', error.message);
-      return { decision: 'WAIT' };
+      console.error('❌ Error en Stream:', error);
+      this.isSpeaking = false;
+    }
+  }
+
+  async streamAudioChunk(text) {
+    try {
+      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': process.env.ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: { stability: 0.4, similarity_boost: 0.8 }, // Stability baja = más expresividad variable
+          optimize_streaming_latency: 4 // MÁXIMA PRIORIDAD
+        })
+      });
+
+      if (!audioResp.ok) throw new Error(`ElevenLabs Error: ${audioResp.status}`);
+
+      const arrayBuffer = await audioResp.arrayBuffer();
+      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+
+      // Enviamos el chunk de audio a Recall
+      // Recall gestiona su propio buffer, así que podemos enviarlos secuencialmente
+      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
+        method: 'POST',
+        headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
+      });
+
+    } catch (e) {
+      console.error('⚠️ Error generando audio chunk:', e.message);
     }
   }
 }
 
 // ════════════════════════════════════════════════════════════════
-// 3. SERVIDOR (Lógica de Flujo)
+// 3. SERVIDOR WEBSOCKET (Lógica de Conexión)
 // ════════════════════════════════════════════════════════════════
 
 const wss = new WebSocket.Server({ noServer: true });
 
-async function loadActiveAgent() {
+async function loadAgent() {
   try {
     const { data: agent, error } = await supabase
       .from('agents')
@@ -120,12 +198,13 @@ async function loadActiveAgent() {
       .eq('is_default', true)
       .single();
 
-    if (error || !agent) throw new Error('No agent found');
-    const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
-
+    if (error || !agent) throw new Error('Agent not found in DB');
+    
+    const vConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
+    
     return {
       agent: { name: agent.name, role: agent.agent_type },
-      voice: { id: voiceConfig?.voice_id || 'eleven_turbo_v2_5', model: 'eleven_turbo_v2_5' }
+      voice: { id: vConfig?.voice_id || 'eleven_turbo_v2_5' }
     };
   } catch (e) {
     console.error('DB Error:', e.message);
@@ -134,165 +213,71 @@ async function loadActiveAgent() {
 }
 
 wss.on('connection', async (ws, req) => {
-  console.log('✅ Conexión OK');
-  const config = await loadActiveAgent();
+  console.log('✅ Cliente conectado');
+  const config = await loadAgent();
   if (!config) { ws.close(); return; }
 
-  const { agent, voice } = config;
-  const brain = new ThinkingBrain(agent);
-  
-  console.log(`👑 Agente Líder: ${agent.name} | Init: ${SOCIAL_CHECK_MS}ms`);
-
-  let currentUtterance = [];
-  let processingTimeoutId = null;
-  let socialCheckTimeoutId = null;
+  let streamManager = null; 
   let botId = null;
-  let audioQueue = []; 
-  let isPlayingAudio = false;
-
-  // --- COLA DE AUDIO ---
-  async function processAudioQueue() {
-    if (isPlayingAudio || audioQueue.length === 0) return;
-    isPlayingAudio = true;
-
-    const { text, resolve } = audioQueue.shift();
-    
-    try {
-      console.log(`🔊 On Air: "${text}"`);
-      
-      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice.id}/stream`, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': process.env.ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text: text,
-          model: 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.5, similarity_boost: 0.8 },
-          optimize_streaming_latency: 4 
-        })
-      });
-
-      const arrayBuffer = await audioResp.arrayBuffer();
-      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
-
-      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${botId}/output_audio/`, {
-        method: 'POST',
-        headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
-      });
-
-      const duration = Math.max(1000, (text.length / 15) * 1000); 
-      setTimeout(() => {
-        isPlayingAudio = false;
-        if (resolve) resolve();
-        processAudioQueue(); 
-      }, duration);
-
-    } catch (e) {
-      console.error('Audio Error:', e);
-      isPlayingAudio = false;
-      processAudioQueue();
-    }
-  }
-
-  function queueSpeak(text) {
-    return new Promise((resolve) => {
-      audioQueue.push({ text, resolve });
-      processAudioQueue();
-    });
-  }
-
-  // --- Reiniciar Vigilancia ---
-  function resetSocialTimer() {
-    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
-    // Solo activamos vigilancia si NO se está reproduciendo audio
-    if (!isPlayingAudio && audioQueue.length === 0) {
-      socialCheckTimeoutId = setTimeout(performSocialCheck, SOCIAL_CHECK_MS);
-    }
-  }
-
-  // --- Chequeo de Silencio (El bot toma la iniciativa) ---
-  async function performSocialCheck() {
-    const decision = await brain.decideAndRespond('SILENCE_CHECK');
-    if (decision.decision === 'SPEAK') {
-        console.log('⚡ ROMPIENDO EL SILENCIO');
-        if (decision.reflex) queueSpeak(decision.reflex);
-        if (decision.message) queueSpeak(decision.message).then(resetSocialTimer);
-    } else {
-        resetSocialTimer();
-    }
-  }
-
-  // --- Procesar Input Humano ---
-  async function processCompleteUtterance() {
-    if (currentUtterance.length === 0) return;
-    
-    const fullText = currentUtterance.map(w => w.text).join(' ');
-    const speaker = currentUtterance[0].speakerName || 'Usuario';
-    
-    console.log(`📝 Escuchado: "${fullText}"`);
-    currentUtterance = []; 
-    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
-
-    brain.addToHistory(speaker, fullText);
-    
-    const decision = await brain.decideAndRespond('USER_INPUT', fullText);
-    
-    if (decision.decision === 'SPEAK') {
-      if (decision.reflex) {
-        console.log(`⚡ Reflejo: "${decision.reflex}"`);
-        queueSpeak(decision.reflex); 
-      }
-      if (decision.message) {
-        console.log(`💬 Mensaje: "${decision.message}"`);
-        queueSpeak(decision.message).then(resetSocialTimer);
-      }
-    } else {
-      resetSocialTimer();
-    }
-  }
+  let currentUtterance = [];
+  let silenceTimer = null;
 
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
+
+      // 1. Inicialización (Captura de ID)
       if (!botId && msg.data?.bot?.id) {
         botId = msg.data.bot.id;
-        console.log(`✅ ID: ${botId}`);
-        resetSocialTimer(); // Inicia vigilancia apenas entra
+        console.log(`🤖 Bot ID: ${botId}`);
+        streamManager = new StreamManager(config.agent, botId, config.voice);
       }
 
+      // 2. Procesamiento de Audio (Transcript)
       if ((msg.event || msg.type) === 'transcript.data') {
         const words = msg.data.data?.words || [];
-        const participant = msg.data.data?.participant;
         
         if (words.length > 0) {
-          // Interrupción: Limpiamos todo
-          if (processingTimeoutId) clearTimeout(processingTimeoutId);
-          if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
-          
-          // Opcional: Si quieres que el bot se calle si lo interrumpen:
-          // audioQueue = []; 
-          
+          // Si el bot está hablando, NO escuchamos (evita auto-escucha y loop)
+          if (streamManager && streamManager.isSpeaking) return;
+
+          // Cancelamos el timer de silencio porque el usuario sigue hablando
+          if (silenceTimer) clearTimeout(silenceTimer);
+
           words.forEach(w => {
-            currentUtterance.push({
-              text: w.text,
-              speakerName: participant?.name || 'Desconocido'
-            });
+            currentUtterance.push(w.text);
           });
-          processingTimeoutId = setTimeout(processCompleteUtterance, AGGRESSIVE_SILENCE_MS);
+
+          // Reiniciamos el timer
+          silenceTimer = setTimeout(() => {
+            if (currentUtterance.length > 0 && streamManager) {
+              const fullText = currentUtterance.join(' ');
+              currentUtterance = []; // Limpiar buffer inmediatamente
+              
+              // Disparar el proceso de streaming
+              streamManager.processUserMessage(fullText);
+            }
+          }, SILENCE_THRESHOLD_MS);
         }
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error('WS Error:', e.message);
+    }
   });
 
   ws.on('close', () => {
-    if (processingTimeoutId) clearTimeout(processingTimeoutId);
-    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
+    if (silenceTimer) clearTimeout(silenceTimer);
+    console.log('❌ Cliente desconectado');
   });
 });
 
-app.get('/', (req, res) => res.send('Leader Brain 🧠'));
+// ════════════════════════════════════════════════════════════════
+// 4. SERVIDOR HTTP
+// ════════════════════════════════════════════════════════════════
+
+app.get('/', (req, res) => res.send('Recall Streaming Core v1.0'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
-server.on('upgrade', (req, socket, head) => wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)));
+
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+});
