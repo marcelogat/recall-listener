@@ -1,257 +1,719 @@
-// ════════════════════════════════════════════════════════════════
-// server.js - FASE 7: ESTABILIDAD Y LOG VISUAL
-// ════════════════════════════════════════════════════════════════
-
-require('dotenv').config();
 const WebSocket = require('ws');
-const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
-const fetch = require('node-fetch');
+const { ThinkingAgent } = require('./thinking-agent');
 
-const app = express();
-const port = process.env.PORT || 8080;
-
-// ⚡ TIEMPOS
-const SILENCE_THRESHOLD_MS = 600; 
-const FIRST_MESSAGE_DELAY_MS = 1500; 
-
-console.log('🚀 Servidor WebSocket: LOG VISUAL MEJORADO');
-
-// ════════════════════════════════════════════════════════════════
-// 1. SUPABASE
-// ════════════════════════════════════════════════════════════════
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ FATAL: Faltan variables SUPABASE.');
-  process.exit(1);
-}
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ════════════════════════════════════════════════════════════════
-// 2. GESTOR DE RESPUESTA (Con Candado de Procesamiento)
-// ════════════════════════════════════════════════════════════════
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const RECALL_API_KEY = process.env.RECALL_API_KEY;
+const RECALL_REGION = process.env.RECALL_REGION || 'us-west-2';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
-class StreamManager {
-  constructor(agentConfig, botId, voiceConfig) {
-    this.agentName = agentConfig.name;
-    this.agentRole = agentConfig.role;
-    this.botId = botId;
-    this.voiceId = voiceConfig.id;
-    this.conversationHistory = [];
-    
-    this.isProcessing = false; 
-    this.isFirstInteraction = true; 
-    this.isInterrupted = false;
-  }
+const wss = new WebSocket.Server({ port: 8080 });
 
-  addToHistory(role, text) {
-    this.conversationHistory.push({ role, content: text });
-    if (this.conversationHistory.length > 12) this.conversationHistory.shift();
-  }
+console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
 
-  getFormattedHistory() {
-    return this.conversationHistory.map(msg => ({
-      role: msg.role === this.agentName ? 'assistant' : 'user',
-      content: msg.content
-    }));
-  }
+async function loadActiveAgent(agentName = null) {
+  try {
+    console.log('📥 Cargando configuración del agente desde la base de datos...');
 
-  stop() {
-    this.isInterrupted = true;
-    this.isProcessing = false;
-    console.log('🛑 Interrupción.');
-  }
+    let query = supabase
+      .from('agents')
+      .select(`
+        *,
+        agent_voice_config (*)
+      `)
+      .eq('is_active', true);
 
-  async processUserMessage(userText) {
-    if (this.isProcessing) {
-        console.log('🔒 ERROR DE CONCURRENCIA: Ya estoy pensando. Ignorando input.');
-        return; 
+    if (agentName) {
+      query = query.eq('name', agentName.toLowerCase());
+      console.log(`   🔍 Buscando agente: ${agentName}`);
+    } else {
+      query = query.eq('is_default', true);
+      console.log('   🔍 Buscando agente por defecto');
     }
-    this.isProcessing = true;
-    
-    console.log(`\n🧠 INICIANDO PENSAMIENTO (Input: ${userText.substring(0, 40).trim()}...)...`); // 🟢 LOG INICIO
-    this.addToHistory('user', userText);
-    this.isInterrupted = false; 
 
-    const systemPrompt = `
-    Eres ${this.agentName}, ${this.agentRole}.
-    INSTRUCCIONES:
-    1. Responde de forma natural y conversacional, y siempre devuelve una pregunta o un gancho.
-    2. Mantente conciso.
-    3. Finaliza siempre con una pregunta o un gancho para mantener el flujo.
-    `;
+    const { data: agent, error } = await query.single();
+
+    if (error || !agent) {
+      console.error('❌ Error cargando agente:', error);
+      throw new Error(`No se pudo cargar el agente${agentName ? ` "${agentName}"` : ' por defecto'}`);
+    }
+
+    if (!agent.agent_voice_config || agent.agent_voice_config.length === 0) {
+      throw new Error(`El agente ${agent.name} no tiene configuración de voz`);
+    }
+
+    const voiceConfig = agent.agent_voice_config.find(v => v.is_active);
+
+    if (!voiceConfig) {
+      throw new Error(`El agente ${agent.name} no tiene una voz activa`);
+    }
+
+    console.log(`✅ Agente cargado exitosamente:`);
+    console.log(`   👤 Nombre: ${agent.display_name}`);
+    console.log(`   🎭 Tipo: ${agent.agent_type}`);
+    console.log(`   🗣️  Voz: ${voiceConfig.voice_name}`);
+    console.log(`   🌍 Idioma: ${agent.language}`);
+    console.log(`   📍 Ubicación: ${agent.city}, ${agent.country}`);
+    console.log(`   🤖 Modelo LLM: ${agent.llm_model}`);
+    console.log(`   ⏱️  Timeouts: silence=${agent.silence_timeout_ms}ms, conversation=${agent.conversation_timeout_ms}ms`);
+
+    return {
+      agent,
+      voiceConfig
+    };
+
+  } catch (error) {
+    console.error('❌ Error en loadActiveAgent:', error.message);
+    throw error;
+  }
+}
+
+wss.on('connection', async function connection(ws, req) {
+  const clientIp = req.socket.remoteAddress;
+  console.log(`\n✅ Nueva conexión WebSocket desde: ${clientIp}`);
+
+  let agentConfig;
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const agentName = url.searchParams.get('agent');
+    
+    agentConfig = await loadActiveAgent(agentName);
+  } catch (error) {
+    console.error('❌ No se pudo cargar el agente, cerrando conexión');
+    ws.close(1011, 'No se pudo cargar configuración del agente');
+    return;
+  }
+
+  const { agent, voiceConfig } = agentConfig;
+
+  // 🧠 INICIALIZAR AGENTE PENSANTE
+  const meetingId = `meeting_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const thinkingAgent = new ThinkingAgent(meetingId, agentConfig);
+
+  const AGENT_PROFILE = agent.profile_text;
+  const SILENCE_TIMEOUT = agent.silence_timeout_ms;
+  const CONVERSATION_TIMEOUT = agent.conversation_timeout_ms;
+  const AUDIO_COOLDOWN = agent.audio_cooldown_ms;
+  const FIRST_MESSAGE_SILENCE = agent.first_message_silence_seconds;
+  const CONTEXT_HISTORY_LENGTH = agent.llm_context_history_length;
+  
+  const VOICE_ID = voiceConfig.voice_id;
+  const VOICE_MODEL = voiceConfig.voice_model;
+  const VOICE_SETTINGS = voiceConfig.voice_settings;
+
+  let currentUtterance = [];
+  let silenceTimeoutId = null;
+  let conversationTimeoutId = null;
+  let lastSpeaker = null;
+  let botId = null;
+  let conversationHistory = [];
+  
+  let uniqueSpeakers = new Set();
+  let isAgentSpeaking = false;
+  let isAgentActive = false;
+  let lastAgentResponseTime = 0;
+  let isProcessing = false;
+  let lastWordTime = 0;
+  let isFirstMessage = true;
+  let conversationTimeoutStartTime = 0;
+  let userIsCurrentlySpeaking = false;
+
+  console.log(`\n🎙️ ${agent.display_name} está listo y escuchando...\n`);
+
+  async function generateElevenLabsAudio(text, addInitialSilence = false) {
+    try {
+      console.log(`🎙️ Generando audio con ${voiceConfig.voice_name}...`);
+      
+      let finalText = text;
+      if (addInitialSilence) {
+        finalText = `<break time="${FIRST_MESSAGE_SILENCE}s"/> ${text}`;
+        console.log(`🔇 Agregando ${FIRST_MESSAGE_SILENCE}s de silencio inicial (primer mensaje)`);
+      }
+      
+      console.log(`📝 Texto: "${finalText}"`);
+
+      const startTime = Date.now();
+
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: finalText,
+          model_id: VOICE_MODEL,
+          voice_settings: VOICE_SETTINGS
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
+      }
+
+      const audioBuffer = await response.arrayBuffer();
+      const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
+
+      const duration = Date.now() - startTime;
+      console.log(`✅ Audio generado en ${duration}ms: ${mp3Base64.length} caracteres`);
+      
+      return mp3Base64;
+
+    } catch (error) {
+      console.error('❌ Error generando audio con ElevenLabs:', error.message);
+      throw error;
+    }
+  }
+
+  async function sendAudioToBot(audioBase64) {
+    if (!botId) {
+      console.error('❌ No hay bot_id disponible para enviar audio');
+      return;
+    }
 
     try {
+      console.log('🔊 Enviando audio al bot de Recall.ai...');
+      const startTime = Date.now();
+      
+      const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${RECALL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          kind: 'mp3',
+          b64_data: audioBase64
+        })
+      });
+
+      const duration = Date.now() - startTime;
+
+      if (response.ok) {
+        console.log(`✅ Audio enviado al bot en ${duration}ms`);
+      } else {
+        const error = await response.text();
+        console.error('❌ Error enviando audio al bot:', response.status, error);
+      }
+    } catch (error) {
+      console.error('❌ Error en sendAudioToBot:', error.message);
+    }
+  }
+
+  async function getGPT4Response(userMessage, speakerName) {
+    try {
+      console.log(`🤖 Obteniendo respuesta de ${agent.llm_model}...`);
+      const startTime = Date.now();
+
+      const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
+
+      conversationHistory.push({
+        role: 'user',
+        content: messageWithSpeaker
+      });
+
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini', 
+          model: agent.llm_model,
           messages: [
-            { role: 'system', content: systemPrompt },
-            ...this.getFormattedHistory()
+            {
+              role: 'system',
+              content: AGENT_PROFILE
+            },
+            ...conversationHistory
           ],
-          temperature: 0.7,
-          max_tokens: 250 
+          temperature: agent.llm_temperature,
+          max_tokens: agent.llm_max_tokens,
+          top_p: 1,
+          frequency_penalty: 0,
+          presence_penalty: 0
         })
       });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`OpenAI error: ${response.status} - ${error}`);
+      }
 
       const data = await response.json();
-      
-      if (this.isInterrupted) return; 
+      const assistantMessage = data.choices[0].message.content;
 
-      const fullText = data.choices[0].message.content;
-      
-      console.log(`✅ DECISIÓN: SPEAK`); // 🟢 LOG DECISIÓN
-      console.log(`💬 TEXTO COMPLETO: "${fullText}"`); // 🟢 LOG TEXTO
+      conversationHistory.push({
+        role: 'assistant',
+        content: assistantMessage
+      });
 
-      await this.generateAndSendAudio(fullText);
-
-      if (!this.isInterrupted) {
-          this.addToHistory(this.agentName, fullText);
+      if (conversationHistory.length > CONTEXT_HISTORY_LENGTH) {
+        conversationHistory = conversationHistory.slice(-CONTEXT_HISTORY_LENGTH);
       }
+
+      const duration = Date.now() - startTime;
+      console.log(`🎯 Respuesta de ${agent.llm_model} en ${duration}ms:`, assistantMessage);
+      
+      return assistantMessage;
 
     } catch (error) {
-      console.error('❌ Error Proceso:', error.message);
-      // Asumimos WAIT si falla
-      console.log(`⏸️ DECISIÓN: WAIT (Fallo en LLM)`); // 🟢 LOG FALLO/WAIT
-    } finally {
-      this.isProcessing = false;
+      console.error('❌ Error obteniendo respuesta de GPT:', error.message);
+      throw error;
     }
   }
 
-  async generateAndSendAudio(text) {
-    if (this.isInterrupted) return;
-
-    if (this.isFirstInteraction) {
-      console.log(`🔌 Calentando motores (${FIRST_MESSAGE_DELAY_MS}ms)...`);
-      await new Promise(resolve => setTimeout(resolve, FIRST_MESSAGE_DELAY_MS));
-      this.isFirstInteraction = false;
-    }
-
-    try {
-      console.log(`🔊 Generando audio completo...`);
-      
-      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': process.env.ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text: text,
-          model: 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.5, similarity_boost: 0.8 },
-          optimize_streaming_latency: 4
-        })
-      });
-
-      if (!audioResp.ok) throw new Error(`ElevenLabs: ${audioResp.status}`);
-      
-      const arrayBuffer = await audioResp.arrayBuffer();
-      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
-
-      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
-        method: 'POST',
-        headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
-      });
-      
-      console.log(`✅ Audio enviado.`);
-
-    } catch (e) {
-      console.error('Error Audio:', e.message);
-    }
-  }
-}
-
-// ════════════════════════════════════════════════════════════════
-// 3. SERVIDOR WEBSOCKET
-// ════════════════════════════════════════════════════════════════
-
-const wss = new WebSocket.Server({ noServer: true });
-
-async function loadAgent() {
-  try {
-    const { data: agent, error } = await supabase
-      .from('agents')
-      .select(`*, agent_voice_config (*)`)
-      .eq('is_default', true)
-      .single();
-
-    if (error || !agent) throw new Error('Agent not found');
-    const vConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
+  function activateConversation() {
+    isAgentActive = true;
+    console.log('🟢 MODO ACTIVO: Agente en conversación');
     
-    return {
-      agent: { name: agent.name, role: agent.agent_type },
-      voice: { id: vConfig?.voice_id || 'eleven_turbo_v2_5' }
-    };
-  } catch (e) {
-    console.error('DB Error:', e.message);
-    return null;
+    if (conversationTimeoutId) {
+      clearTimeout(conversationTimeoutId);
+      console.log('   ⏱️  Timeout anterior cancelado');
+    }
+    
+    conversationTimeoutStartTime = Date.now();
+    
+    conversationTimeoutId = setTimeout(() => {
+      const elapsed = Date.now() - conversationTimeoutStartTime;
+      console.log(`🔴 MODO PASIVO: Conversación terminada por inactividad (${elapsed}ms transcurridos)`);
+      isAgentActive = false;
+      conversationTimeoutId = null;
+    }, CONVERSATION_TIMEOUT);
+    
+    console.log(`   ⏰ Nuevo timeout de conversación: ${CONVERSATION_TIMEOUT/1000}s`);
   }
-}
 
-wss.on('connection', async (ws, req) => {
-  console.log('✅ Cliente conectado');
-  const config = await loadAgent();
-  if (!config) { ws.close(); return; }
+  function cancelConversationTimeout() {
+    if (conversationTimeoutId) {
+      const elapsed = Date.now() - conversationTimeoutStartTime;
+      clearTimeout(conversationTimeoutId);
+      conversationTimeoutId = null;
+      console.log(`⏸️  Timeout CANCELADO (había transcurrido ${elapsed}ms de ${CONVERSATION_TIMEOUT}ms)`);
+    }
+  }
 
-  let streamManager = null; 
-  let botId = null;
-  let currentUtterance = [];
-  let silenceTimer = null;
+  function canAgentRespond() {
+    const now = Date.now();
+    const timeSinceLastResponse = now - lastAgentResponseTime;
+    
+    if (isAgentSpeaking) {
+      console.log('⏸️  El agente está hablando actualmente');
+      return false;
+    }
+    
+    if (isProcessing) {
+      console.log('⏸️  Ya se está procesando una respuesta');
+      return false;
+    }
+    
+    if (timeSinceLastResponse < AUDIO_COOLDOWN) {
+      const remainingTime = Math.ceil((AUDIO_COOLDOWN - timeSinceLastResponse) / 1000);
+      console.log(`⏸️  Cooldown activo: esperando ${remainingTime}s más`);
+      return false;
+    }
+    
+    return true;
+  }
 
-  ws.on('message', async (data) => {
+  function shouldAgentRespond(text) {
+    if (isAgentActive) {
+      console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
+      return true;
+    }
+    
+    console.log('👂 MODO PASIVO: Verificando triggers...');
+    
+    const hasTrigger = detectAgentMentionOrQuestion(text);
+    
+    if (hasTrigger) {
+      console.log('🔔 Trigger detectado en modo pasivo');
+      console.log('🎯 Activando conversación...');
+      activateConversation();
+      return true;
+    }
+    
+    console.log('⏭️  Sin trigger en modo pasivo, ignorando');
+    return false;
+  }
+
+  function detectAgentMentionOrQuestion(text) {
+    function normalizeText(str) {
+      return str
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    const normalizedText = normalizeText(text);
+    
+    const agentNameVariations = [
+      normalizeText(agent.name),
+      normalizeText(agent.display_name)
+    ];
+    
+    const mentionedByName = agentNameVariations.some(name => 
+      normalizedText.includes(name)
+    );
+    
+    if (mentionedByName) {
+      console.log(`   → Mención de "${agent.name}"`);
+      return true;
+    }
+    
+    let questionPhrases = [];
+    
+    if (agent.language.startsWith('es')) {
+      questionPhrases = [
+        'me gustaria saber', 'me gustaria que', 'quisiera saber',
+        'podrias decirme', 'podrias explicarme', 'podrias contarme',
+        'puedes decirme', 'puedes explicarme', 'puedes contarme',
+        'necesito saber', 'quiero saber', 'quiero que me',
+        'tengo una pregunta', 'una pregunta', 'consulta',
+        'ayudame con', 'ayudame a', 'necesito ayuda'
+      ];
+    } else if (agent.language.startsWith('en')) {
+      questionPhrases = [
+        'i would like to know', 'could you tell me', 'could you explain',
+        'can you tell me', 'can you explain', 'i want to know',
+        'i need to know', 'i have a question', 'help me with'
+      ];
+    }
+    
+    const hasQuestionPhrase = questionPhrases.some(phrase => 
+      normalizedText.includes(phrase)
+    );
+    
+    if (hasQuestionPhrase) {
+      console.log('   → Frase de pregunta indirecta detectada');
+      return true;
+    }
+    
+    if (agent.language.startsWith('es')) {
+      const siConditionalPattern = /\b(si|s)\s+\w+\s+(puede|pueden|es|son|esta|hay|tiene|funciona)/;
+      if (siConditionalPattern.test(normalizedText)) {
+        console.log('   → Pregunta condicional con "si" detectada');
+        return true;
+      }
+    }
+    
+    let questionWords = [];
+    
+    if (agent.language.startsWith('es')) {
+      questionWords = [
+        'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
+        'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
+        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
+      ];
+    } else if (agent.language.startsWith('en')) {
+      questionWords = [
+        'what', 'who', 'how', 'when', 'where', 'why', 'which', 'if'
+      ];
+    }
+    
+    const normalizedQuestionWords = questionWords.map(w => normalizeText(w));
+    
+    const hasQuestionWord = normalizedQuestionWords.some(word => {
+      const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
+      return regex.test(normalizedText);
+    });
+    
+    const hasQuestionMark = text.includes('?');
+    
+    if (hasQuestionWord || hasQuestionMark) {
+      console.log('   → Pregunta detectada (palabra interrogativa o ?)');
+      return true;
+    }
+    
+    return false;
+  }
+
+  function isEndOfSentence(text) {
+    const trimmed = text.trim();
+    
+    const endsWithPunctuation = /[.!?]$/.test(trimmed);
+    
+    let conversationalEndings = [];
+    
+    if (agent.language.startsWith('es')) {
+      conversationalEndings = [
+        /\bdale$/i, /\bbueno$/i, /\bok$/i, /\bjoya$/i,
+        /\bperfecto$/i, /\bbárbaro$/i, /\bgenial$/i,
+        /\bclaro$/i, /\bexacto$/i, /\bsí$/i, /\bno$/i,
+        /\bgracias$/i, /\bchau$/i, /\bhola$/i
+      ];
+    } else if (agent.language.startsWith('en')) {
+      conversationalEndings = [
+        /\bokay$/i, /\bok$/i, /\balright$/i, /\bgreat$/i,
+        /\bperfect$/i, /\bsure$/i, /\byes$/i, /\bno$/i,
+        /\bthanks$/i, /\bbye$/i, /\bhello$/i, /\bhi$/i
+      ];
+    }
+    
+    const hasConversationalEnding = conversationalEndings.some(pattern => 
+      pattern.test(trimmed)
+    );
+    
+    const hasCompleteThought = trimmed.split(' ').length >= 3;
+    
+    const isShortValidResponse = trimmed.split(' ').length <= 5 && (
+      endsWithPunctuation || hasConversationalEnding
+    );
+    
+    const isComplete = endsWithPunctuation || 
+                      hasConversationalEnding || 
+                      (hasCompleteThought && trimmed.length > 15) ||
+                      isShortValidResponse;
+    
+    return isComplete;
+  }
+
+  async function sendToAgent(text, speakerName) {
+    if (!canAgentRespond()) {
+      return;
+    }
+
     try {
-      const msg = JSON.parse(data);
+      isProcessing = true;
+      isAgentSpeaking = true;
+      
+      console.log(`\n📤 Procesando mensaje para ${agent.name}`);
+      console.log(`   👤 De: ${speakerName}`);
+      console.log(`   💬 Mensaje: ${text}`);
+      console.log(`   🎬 Primer mensaje: ${isFirstMessage ? 'SÍ' : 'NO'}`);
+      const totalStartTime = Date.now();
 
-      if (!botId && msg.data?.bot?.id) {
-        botId = msg.data.bot.id;
-        console.log(`🤖 Bot ID: ${botId}`);
-        streamManager = new StreamManager(config.agent, botId, config.voice);
+      const responseText = await getGPT4Response(text, speakerName);
+      const audioBase64 = await generateElevenLabsAudio(responseText, isFirstMessage);
+      await sendAudioToBot(audioBase64);
+
+      // 🧠 NOTIFICAR AL AGENTE PENSANTE
+      await thinkingAgent.processUtterance(responseText, {
+        speakerName: agent.display_name,
+        speakerId: 'agent',
+        isAgentSpeaking: true
+      });
+
+      if (isFirstMessage) {
+        isFirstMessage = false;
+        console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
       }
 
-      if ((msg.event || msg.type) === 'transcript.data') {
-        const words = msg.data.data?.words || [];
+      lastAgentResponseTime = Date.now();
+
+      const totalDuration = Date.now() - totalStartTime;
+      console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
+      console.log(`⏰ Cooldown activado por ${AUDIO_COOLDOWN/1000}s`);
+
+    } catch (error) {
+      console.error('❌ Error en sendToAgent:', error.message);
+    } finally {
+      isProcessing = false;
+      
+      setTimeout(() => {
+        isAgentSpeaking = false;
+        console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
+      }, 2000);
+    }
+  }
+
+  async function processCompleteUtterance() {
+    if (isProcessing) {
+      console.log('⏭️  Ya hay un procesamiento en curso, ignorando utterance completo');
+      return;
+    }
+
+    if (currentUtterance.length === 0) return;
+
+    try {
+      const fullText = currentUtterance.map(word => word.text).join(' ');
+      const speaker = currentUtterance[0].speaker;
+      const speakerName = currentUtterance[0].speakerName;
+      const startTime = currentUtterance[0].start_time;
+      const endTime = currentUtterance[currentUtterance.length - 1].end_time;
+      const wordCount = currentUtterance.length;
+
+      console.log('\n💾 PROCESANDO TRANSCRIPT COMPLETO:');
+      console.log(`   👤 Speaker: ${speakerName} (${speaker})`);
+      console.log(`   📝 Texto: "${fullText}"`);
+      console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
+      console.log(`   📊 Palabras: ${wordCount}`);
+      console.log(`   👥 Total speakers: ${uniqueSpeakers.size}`);
+      console.log(`   🎯 Estado: ${isAgentActive ? 'ACTIVO' : 'PASIVO'}`);
+      
+      const isComplete = isEndOfSentence(fullText);
+      console.log(`   ✅ Frase completa: ${isComplete ? 'Sí' : 'No'}`);
+
+      const hasMinimumWords = wordCount >= 2;
+      const shouldProcess = isComplete || hasMinimumWords;
+
+      if (!shouldProcess) {
+        console.log('⏭️  Esperando más contenido (muy corto)');
+        return;
+      }
+
+      userIsCurrentlySpeaking = false;
+
+      // 🧠 ENVIAR AL AGENTE PENSANTE
+      await thinkingAgent.processUtterance(fullText, {
+        speakerName,
+        speakerId: speaker,
+        isAgentSpeaking: false
+      });
+
+      if (shouldAgentRespond(fullText)) {
+        console.log('🎯 ¡Respuesta activada! Procesando...');
+        await sendToAgent(fullText, speakerName);
+      } else {
+        console.log('⏭️  No se debe responder');
+      }
+
+      currentUtterance = [];
+
+    } catch (error) {
+      console.error('❌ Error en processCompleteUtterance:', error.message);
+    }
+  }
+
+  ws.on('message', async function incoming(message) {
+    try {
+      const data = JSON.parse(message);
+      
+      if (data.event === 'transcript.data') {
+        const words = data.data?.data?.words;
+        const participant = data.data?.data?.participant;
         
-        if (words.length > 0) {
-          if (streamManager) streamManager.stop();
-          
-          if (silenceTimer) clearTimeout(silenceTimer);
-          words.forEach(w => currentUtterance.push(w.text));
-
-          silenceTimer = setTimeout(() => {
-            if (currentUtterance.length > 0 && streamManager) {
-              const fullText = currentUtterance.join(' ');
-              currentUtterance = []; 
-              streamManager.processUserMessage(fullText);
-            }
-          }, SILENCE_THRESHOLD_MS);
+        if (!botId && data.data?.bot?.id) {
+          botId = data.data.bot.id;
+          console.log(`🤖 Bot ID capturado: ${botId}`);
         }
+
+        if (words && words.length > 0 && participant) {
+          lastWordTime = Date.now();
+          
+          if (!userIsCurrentlySpeaking) {
+            userIsCurrentlySpeaking = true;
+            console.log('🗣️  Usuario comenzó a hablar');
+          }
+          
+          if (isAgentActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
+            cancelConversationTimeout();
+          }
+          
+          console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
+
+          const speakerId = participant.id;
+          const speakerName = participant.name || `Speaker ${speakerId}`;
+          
+          uniqueSpeakers.add(speakerId);
+
+          if (lastSpeaker !== null && lastSpeaker !== speakerId) {
+            console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
+            
+            if (isProcessing) {
+              console.log('⏭️  Ya hay un procesamiento en curso, ignorando cambio de speaker');
+            } else {
+              await processCompleteUtterance();
+            }
+          }
+
+          words.forEach(word => {
+            const text = word.text || '';
+            if (text.trim()) {
+              currentUtterance.push({
+                text: text,
+                speaker: speakerId,
+                speakerName: speakerName,
+                start_time: word.start_timestamp?.relative || 0,
+                end_time: word.end_timestamp?.relative || 0
+              });
+            }
+          });
+
+          lastSpeaker = speakerId;
+
+          if (silenceTimeoutId) {
+            clearTimeout(silenceTimeoutId);
+          }
+
+          silenceTimeoutId = setTimeout(async () => {
+            if (isProcessing) {
+              console.log('⏭️  Procesamiento en curso, posponer timeout de silencio');
+              if (silenceTimeoutId) {
+                clearTimeout(silenceTimeoutId);
+              }
+              silenceTimeoutId = setTimeout(async () => {
+                const timeSinceLastWord = Date.now() - lastWordTime;
+                console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
+                await processCompleteUtterance();
+              }, SILENCE_TIMEOUT);
+              return;
+            }
+            
+            const timeSinceLastWord = Date.now() - lastWordTime;
+            console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
+            await processCompleteUtterance();
+          }, SILENCE_TIMEOUT);
+
+          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+        }
+      } else if (data.event === 'transcript.partial_data') {
+        console.log('   ⏭️  Ignorando partial_data');
       }
-    } catch (e) { console.error(e); }
+      
+    } catch (e) {
+      console.error('❌ Error procesando mensaje:', e.message);
+    }
   });
+
+  ws.on('close', async function close(code, reason) {
+    console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
+    console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
+    
+    // 🧠 OBTENER PENSAMIENTOS FINALES
+    await thinkingAgent.getFinalThoughts();
+    
+    if (currentUtterance.length > 0) {
+      await processCompleteUtterance();
+    }
+    
+    if (silenceTimeoutId) {
+      clearTimeout(silenceTimeoutId);
+    }
+    
+    if (conversationTimeoutId) {
+      clearTimeout(conversationTimeoutId);
+    }
+  });
+
+  ws.on('error', function error(err) {
+    console.error('❌ Error en WebSocket:', err.message);
+  });
+
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    }
+  }, 30000);
 
   ws.on('close', () => {
-    if (silenceTimer) clearTimeout(silenceTimer);
-    if (streamManager) streamManager.stop();
-    console.log('❌ Cliente desconectado');
+    clearInterval(pingInterval);
   });
 });
 
-// ════════════════════════════════════════════════════════════════
-// 4. HTTP
-// ════════════════════════════════════════════════════════════════
-
-app.get('/', (req, res) => res.send('Single Shot Core v7.0 (Stable)'));
-const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
-
-server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+process.on('uncaughtException', (error) => {
+  console.error('❌ Error no capturado:', error);
 });
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Promesa rechazada:', reason);
+});
+
+console.log('\n📡 Servidor WebSocket listo - Esperando conexiones...\n');
