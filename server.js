@@ -323,25 +323,112 @@ wss.on('connection', async function connection(ws, req) {
     return true;
   }
 
-  function shouldAgentRespond(text) {
+  async function shouldAgentRespond(text, speakerName) {
     if (isAgentActive) {
       console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
       return true;
     }
     
-    console.log('👂 MODO PASIVO: Verificando triggers...');
+    console.log('👂 MODO PASIVO: La IA decidirá si debe responder...');
     
-    const hasTrigger = detectAgentMentionOrQuestion(text);
+    // Usar IA para decidir si debe responder
+    const shouldRespond = await aiDecideShouldRespond(text, speakerName);
     
-    if (hasTrigger) {
-      console.log('🔔 Trigger detectado en modo pasivo');
+    if (shouldRespond) {
+      console.log('🔔 IA decidió que debe responder');
       console.log('🎯 Activando conversación...');
       activateConversation();
       return true;
     }
     
-    console.log('⏭️  Sin trigger en modo pasivo, ignorando');
+    console.log('⏭️  IA decidió no responder');
     return false;
+  }
+
+  async function aiDecideShouldRespond(text, speakerName) {
+    try {
+      console.log('🤖 Consultando a la IA si debe responder...');
+      
+      // Contexto reciente de la conversación
+      const recentContext = conversationHistory.slice(-6).map(msg => {
+        return `${msg.role === 'user' ? '[Usuario]' : '[' + agent.display_name + ']'}: ${msg.content}`;
+      }).join('\n');
+
+      const prompt = `Sos ${agent.display_name}, un agente de IA en una reunión. 
+
+TU PERFIL:
+${AGENT_PROFILE.substring(0, 500)}
+
+CONTEXTO RECIENTE DE LA CONVERSACIÓN:
+${recentContext || 'No hay contexto previo'}
+
+NUEVA INTERVENCIÓN:
+${speakerName} dice: "${text}"
+
+PREGUNTA: ¿Debés responder a esto?
+
+Respondé "SI" si:
+- Te están hablando directamente (mencionan tu nombre)
+- Te hicieron una pregunta (directa o indirecta)
+- Hay algo que debas aclarar o agregar según tu rol
+- Dijiste algo y están respondiendo a eso
+- Hay una pausa que espera tu respuesta
+- Es tu turno natural en la conversación
+
+Respondé "NO" si:
+- Están hablando entre ellos sin dirigirse a vos
+- Es un comentario que no requiere tu input
+- Ya respondiste y están procesando
+- No sos necesario en este momento
+
+Responde SOLO con un JSON:
+{
+  "should_respond": true/false,
+  "reason": "explicación breve de por qué sí o no"
+}`;
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: 'Eres un asistente que decide si un agente de IA debe responder. Respondes SOLO en JSON válido.'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.3,
+          max_tokens: 150,
+          response_format: { type: "json_object" }
+        })
+      });
+
+      if (!response.ok) {
+        console.error('❌ Error en IA decision, usando fallback');
+        return detectAgentMentionOrQuestion(text); // Fallback a triggers
+      }
+
+      const data = await response.json();
+      const decision = JSON.parse(data.choices[0].message.content);
+      
+      console.log(`🤖 Decisión de IA: ${decision.should_respond ? 'RESPONDER' : 'NO RESPONDER'}`);
+      console.log(`   Razón: ${decision.reason}`);
+
+      return decision.should_respond;
+
+    } catch (error) {
+      console.error('❌ Error en aiDecideShouldRespond:', error.message);
+      // Fallback a detección de triggers si falla la IA
+      return detectAgentMentionOrQuestion(text);
+    }
   }
 
   function detectAgentMentionOrQuestion(text) {
@@ -568,7 +655,7 @@ wss.on('connection', async function connection(ws, req) {
         isAgentSpeaking: false
       });
 
-      if (shouldAgentRespond(fullText)) {
+      if (await shouldAgentRespond(fullText, speakerName)) {
         console.log('🎯 ¡Respuesta activada! Procesando...');
         await sendToAgent(fullText, speakerName);
       } else {
