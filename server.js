@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - Sistema Thinking Brain (Versión Final Integrada)
+// server.js - FUSIÓN: Mecánica Robusta + Cerebro Pensante
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,594 +11,279 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-console.log('🚀 Servidor WebSocket con THINKING BRAIN');
-console.log('🧠 Sistema: GPT-4o-mini inteligente');
-console.log('');
+console.log('🚀 Servidor WebSocket: FUSIÓN (Body V1 + Brain V2)');
 
 // ════════════════════════════════════════════════════════════════
-// SUPABASE CLIENT
+// 1. CONFIGURACIÓN SUPABASE (Corregida)
 // ════════════════════════════════════════════════════════════════
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY; // Usamos la variable de Render
+const supabaseKey = process.env.SUPABASE_ANON_KEY; // Clave correcta de Render
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ ERROR CRÍTICO: Faltan variables de entorno.');
-  console.error('   Revisa en Render: SUPABASE_URL y SUPABASE_ANON_KEY');
+  console.error('❌ ERROR: Faltan variables SUPABASE_URL o SUPABASE_ANON_KEY');
   process.exit(1);
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// THINKING BRAIN CLASS
+// 2. CLASE THINKING BRAIN (El Cerebro)
 // ════════════════════════════════════════════════════════════════
 
 class ThinkingBrain {
-  
-  constructor(agentConfig, botId) {
+  constructor(agentConfig) {
     this.agentName = agentConfig.name;
-    this.agentRole = agentConfig.role;     // Viene de agent_type
-    this.agentVoice = agentConfig.voice_id; // Viene de agent_voice_config
-    this.agentLanguage = agentConfig.language;
-    this.botId = botId;
-    
-    this.conversationHistory = [];
-    this.thoughtHistory = [];
-    this.isProcessing = false;
-    this.isSpeaking = false;
-    
-    this.state = {
-      interventions: 0,
-      questionsAsked: 0,
-      lastSpokeAt: null,
-      feedbackReceived: [],
-      adjustments: {
-        reduceActivity: false,
-        avoidQuestions: false,
-        waitLonger: false
-      }
-    };
-    
-    this.speakerNames = {};
+    this.agentRole = agentConfig.role;
+    this.conversationHistory = []; // Historial corto para contexto
   }
-  
-  async onTranscriptData(data) {
-    
-    const { text, speaker_id, user_name } = data;
-    
-    // Guardar nombres de speakers
-    if (user_name && speaker_id) {
-      this.speakerNames[speaker_id] = user_name;
-    }
-    
-    // Determinar speaker
-    const speaker = this.speakerNames[speaker_id] || 
-                    (speaker_id === 100 ? 'Usuario1' : 
-                     speaker_id === 200 ? 'Usuario2' : 
-                     this.agentName);
-    
-    console.log(`\n📝 [${speaker}]: "${text}"`);
-    
-    // Agregar a historia
-    this.conversationHistory.push({
-      speaker,
-      text,
-      timestamp: Date.now()
-    });
-    
-    // No pensar si soy yo hablando
-    if (speaker === this.agentName) {
-      console.log('   (Soy yo hablando, solo registro)');
-      return;
-    }
-    
-    // No pensar si ya estoy ocupado
-    if (this.isProcessing || this.isSpeaking) {
-      console.log('⏸️  Ocupado, esperando...');
-      return;
-    }
-    
-    // 🧠 PENSAR
-    await this.think();
-  }
-  
-  async think() {
-    
-    this.isProcessing = true;
-    
-    console.log('\n🧠 Pensando...');
-    const startTime = Date.now();
-    
-    try {
-      
-      const prompt = this.buildPrompt();
-      const response = await this.callGPT(prompt);
-      const elapsed = Date.now() - startTime;
-      
-      console.log(`⏱️  Pensamiento completado en ${elapsed}ms`);
-      
-      await this.processThought(response);
-      
-    } catch (error) {
-      console.error('❌ Error al pensar:', error.message);
-    } finally {
-      this.isProcessing = false;
+
+  addToHistory(speaker, text) {
+    this.conversationHistory.push({ speaker, text, time: Date.now() });
+    // Mantenemos solo los últimos 10 mensajes para no saturar el prompt
+    if (this.conversationHistory.length > 10) {
+      this.conversationHistory.shift();
     }
   }
-  
-  buildPrompt() {
-    
-    const recentTranscript = this.getRecentTranscript(180);
-    const stats = this.getStats();
-    
-    return `
-Sos ${this.agentName}, un ${this.agentRole}.
 
-Tu personalidad: Hablás argentino, usás "vos", sos cálido/a y natural.
-
-════════════════════════════════════════════════════════════
-📊 TU COMPORTAMIENTO RECIENTE
-════════════════════════════════════════════════════════════
-
-Intervenciones: ${stats.interventions}
-Preguntas hechas: ${stats.questionsAsked}
-Última intervención: ${stats.timeSinceLastSpoke}
-Participación: ${stats.participationRate}%
-
-${stats.feedbackReceived.length > 0 ? `
-⚠️ FEEDBACK RECIBIDO:
-${stats.feedbackReceived.map(f => `- "${f}"`).join('\n')}
-` : ''}
-
-${this.state.adjustments.reduceActivity ? '🚨 AJUSTE: Reducir actividad\n' : ''}
-${this.state.adjustments.avoidQuestions ? '🚨 AJUSTE: Evitar preguntas\n' : ''}
-
-════════════════════════════════════════════════════════════
-💬 CONVERSACIÓN (últimos 3 minutos)
-════════════════════════════════════════════════════════════
-
-${recentTranscript}
-
-════════════════════════════════════════════════════════════
-🧠 ANALIZA Y DECIDE
-════════════════════════════════════════════════════════════
-
-Responde en este formato:
-
-THINK: [análisis de la situación]
-SELF_CHECK: [auto-evaluación de tu comportamiento]
-DECIDE: SPEAK | WAIT
-CONFIDENCE: [0-10]
-REASON: [por qué decidiste esto]
-MESSAGE: [si SPEAK, tu mensaje en 1-2 oraciones]
-
-CRITERIOS:
-
-SPEAK cuando:
-✅ Pregunta directa
-✅ Pausa >3s tras frase completa
-✅ Momento estratégico claro
-✅ Agregar valor real
-
-WAIT cuando:
-⏸️ Usuario en medio de idea
-⏸️ Frase incompleta
-⏸️ Hablaste hace <20s
-⏸️ Participación >40%
-⏸️ Feedback negativo reciente
-⏸️ Sin razón clara
-
-Regla: En duda → WAIT
-`;
-  }
-  
-  async callGPT(prompt) {
-    
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'Sos un agente conversacional que piensa antes de actuar.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 400
-      })
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`GPT Error: ${error.error?.message || 'Unknown'}`);
-    }
-    
-    const data = await response.json();
-    return data.choices[0].message.content;
-  }
-  
-  async processThought(response) {
-    
-    const thought = this.parseThought(response);
-    
-    this.thoughtHistory.push({
-      timestamp: Date.now(),
-      ...thought
-    });
-    
-    // MOSTRAR LOGS
-    console.log('\n═══════════════════════════════════════════════════════');
-    console.log('🧠 THINK:');
-    console.log(`   ${thought.think}`);
-    console.log('');
-    console.log('🔍 SELF_CHECK:');
-    console.log(`   ${thought.selfCheck}`);
-    console.log('');
-    console.log(`⚡ DECIDE: ${thought.decide}`);
-    console.log(`💪 CONFIDENCE: ${thought.confidence}/10`);
-    console.log(`📝 REASON: ${thought.reason}`);
-    
-    // Detectar ajustes necesarios
-    if (thought.selfCheck.includes('ALERTA') || thought.selfCheck.includes('⚠️')) {
-      console.log('');
-      console.log('🚨 Ajustando comportamiento');
-      this.applyAdjustments(thought.selfCheck);
-    }
-    
-    // HABLAR o ESPERAR
-    if (thought.decide === 'SPEAK' && thought.message) {
-      
-      console.log('');
-      console.log('💬 MENSAJE:');
-      console.log(`   "${thought.message}"`);
-      console.log('═══════════════════════════════════════════════════════');
-      
-      await this.speak(thought.message);
-      
-    } else {
-      
-      console.log('═══════════════════════════════════════════════════════');
-      console.log('⏸️  Decisión: ESPERAR');
-      console.log('');
-    }
-  }
-  
-  parseThought(response) {
-    
-    const thinkMatch = response.match(/THINK:\s*(.+?)(?=\n\s*SELF_CHECK:|\n\s*DECIDE:|$)/s);
-    const selfCheckMatch = response.match(/SELF_CHECK:\s*(.+?)(?=\n\s*DECIDE:|$)/s);
-    const decideMatch = response.match(/DECIDE:\s*(SPEAK|WAIT)/i);
-    const confidenceMatch = response.match(/CONFIDENCE:\s*(\d+)/);
-    const reasonMatch = response.match(/REASON:\s*(.+?)(?=\n\s*MESSAGE:|$)/s);
-    const messageMatch = response.match(/MESSAGE:\s*(.+)/s);
-    
-    return {
-      think: thinkMatch?.[1]?.trim() || 'No analysis',
-      selfCheck: selfCheckMatch?.[1]?.trim() || 'No self-check',
-      decide: decideMatch?.[1]?.toUpperCase() || 'WAIT',
-      confidence: parseInt(confidenceMatch?.[1] || '5'),
-      reason: reasonMatch?.[1]?.trim() || 'No reason',
-      message: messageMatch?.[1]?.trim() || ''
-    };
-  }
-  
-  applyAdjustments(selfCheck) {
-    
-    const lower = selfCheck.toLowerCase();
-    
-    if (lower.includes('muchas preguntas') || lower.includes('preguntas recientes')) {
-      this.state.adjustments.avoidQuestions = true;
-      console.log('   → Evitar preguntas');
-    }
-    
-    if (lower.includes('participación alta') || lower.includes('hablando demasiado')) {
-      this.state.adjustments.reduceActivity = true;
-      console.log('   → Reducir actividad');
-    }
-    
-    if (lower.includes('interrumpí') || lower.includes('interrupciones')) {
-      this.state.adjustments.waitLonger = true;
-      console.log('   → Esperar más');
-    }
-    
-    const lastMessage = this.conversationHistory[this.conversationHistory.length - 1];
-    if (lastMessage) {
-      this.state.feedbackReceived.push(lastMessage.text);
-    }
-  }
-  
-  async speak(message) {
-    
-    this.isSpeaking = true;
-    
-    console.log('');
-    console.log('🗣️  Generando audio...');
-    const startTime = Date.now();
-    
-    try {
-      
-      // Generar con ElevenLabs
-      const audioResponse = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${this.agentVoice}`,
-        {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/mpeg',
-            'Content-Type': 'application/json',
-            'xi-api-key': process.env.ELEVENLABS_API_KEY
-          },
-          body: JSON.stringify({
-            text: message,
-            model_id: 'eleven_turbo_v2_5',
-            voice_settings: {
-              stability: 0.5,
-              similarity_boost: 0.75
-            }
-          })
-        }
-      );
-      
-      if (!audioResponse.ok) {
-        throw new Error(`ElevenLabs error: ${audioResponse.status}`);
-      }
-      
-      const audioBuffer = await audioResponse.buffer();
-      const audioBase64 = audioBuffer.toString('base64');
-      const audioTime = Date.now() - startTime;
-      
-      console.log(`✅ Audio generado en ${audioTime}ms: ${audioBase64.length} caracteres`);
-      
-      // Enviar a Recall.ai
-      const sendResponse = await fetch(
-        `https://us-west-2.recall.ai/api/v1/bot/${this.botId}/send_audio`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Token ${process.env.RECALL_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            audio: audioBase64
-          })
-        }
-      );
-      
-      if (!sendResponse.ok) {
-        throw new Error(`Recall.ai error: ${sendResponse.status}`);
-      }
-      
-      const totalTime = Date.now() - startTime;
-      console.log(`✅ Audio enviado en ${totalTime}ms total`);
-      console.log('');
-      
-      // Actualizar stats
-      this.state.interventions++;
-      this.state.lastSpokeAt = Date.now();
-      
-      if (message.includes('?')) {
-        this.state.questionsAsked++;
-      }
-      
-      // Registrar en historia
-      this.conversationHistory.push({
-        speaker: this.agentName,
-        text: message,
-        timestamp: Date.now()
-      });
-      
-      // Esperar antes de permitir nuevo pensamiento
-      await this.sleep(2000);
-      
-    } catch (error) {
-      console.error('❌ Error al hablar:', error.message);
-    } finally {
-      this.isSpeaking = false;
-    }
-  }
-  
-  getRecentTranscript(seconds) {
-    const now = Date.now();
-    const cutoff = now - (seconds * 1000);
-    
-    const recent = this.conversationHistory
-      .filter(item => item.timestamp > cutoff)
-      .map(item => `[${item.speaker}]: ${item.text}`)
+  getContext() {
+    return this.conversationHistory
+      .map(m => `[${m.speaker}]: ${m.text}`)
       .join('\n');
-    
-    return recent || '[Sin conversación reciente]';
   }
-  
-  getStats() {
-    const now = Date.now();
-    const threeMinAgo = now - 180000;
+
+  async decideAndRespond(lastUserMessage) {
+    console.log('\n🧠 Cerebro analizando situación...');
     
-    const recent = this.conversationHistory.filter(
-      item => item.timestamp > threeMinAgo
-    );
+    const context = this.getContext();
     
-    const myMessages = recent.filter(
-      item => item.speaker === this.agentName
-    );
-    
-    const totalMessages = recent.length;
-    const participationRate = totalMessages > 0
-      ? Math.round((myMessages.length / totalMessages) * 100)
-      : 0;
-    
-    const timeSinceLastSpoke = this.state.lastSpokeAt
-      ? Math.round((now - this.state.lastSpokeAt) / 1000) + 's'
-      : 'nunca';
-    
-    return {
-      interventions: this.state.interventions,
-      questionsAsked: this.state.questionsAsked,
-      timeSinceLastSpoke,
-      participationRate,
-      feedbackReceived: this.state.feedbackReceived
-    };
-  }
-  
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    const prompt = `
+Eres ${this.agentName}, un ${this.agentRole}.
+Tu personalidad es natural, argentina, cálida.
+
+HISTORIAL RECIENTE:
+${context}
+
+INSTRUCCIÓN:
+Analiza el último mensaje. Decide si debes responder.
+- RESPONDE SI: Te preguntan algo, te mencionan, o es un silencio donde tu aporte suma valor crítico.
+- ESPERA SI: El usuario está pensando, completando una idea, o hablando con otro humano.
+
+FORMATO DE RESPUESTA (JSON puro):
+{
+  "decision": "SPEAK" o "WAIT",
+  "reason": "Breve motivo",
+  "message": "Tu respuesta (solo si decision es SPEAK)"
+}
+`;
+
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini', // Rápido y eficiente
+          messages: [
+            { role: 'system', content: 'Eres un cerebro IA que decide cuándo hablar en una reunión.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.6,
+          max_tokens: 150,
+          response_format: { type: "json_object" }
+        })
+      });
+
+      const data = await response.json();
+      const content = JSON.parse(data.choices[0].message.content);
+
+      console.log(`🧠 Decisión: ${content.decision} (${content.reason})`);
+      return content; // Retorna { decision, reason, message }
+
+    } catch (error) {
+      console.error('❌ Error en el cerebro:', error);
+      return { decision: 'WAIT' }; // Ante la duda, silencio
+    }
   }
 }
 
 // ════════════════════════════════════════════════════════════════
-// WEBSOCKET SERVER
+// 3. LÓGICA DEL SERVIDOR (El Cuerpo Robusto del V1)
 // ════════════════════════════════════════════════════════════════
 
-const wss = new WebSocket.Server({ 
-  noServer: true 
-});
+const wss = new WebSocket.Server({ noServer: true });
 
-let brain = null;
-let currentBotId = null;
-let agentConfig = null;
-
-// ════════════════════════════════════════════════════════════════
-// FUNCIÓN DE CARGA DE AGENTE (CORREGIDA)
-// ════════════════════════════════════════════════════════════════
-
-async function loadAgentConfig() {
+// Función de carga de datos (Versión corregida)
+async function loadActiveAgent() {
   try {
-    console.log('🔍 Consultando tabla agents y agent_voice_config...');
-    
-    // 1. Pedimos el agente y su configuración de voz unida
-    // IMPORTANTE: Usamos 'agent_voice_config' porque es el nombre de tu tabla relacionada
     const { data: agent, error } = await supabase
       .from('agents')
-      .select(`
-        *,
-        agent_voice_config (*)
-      `)
+      .select(`*, agent_voice_config (*)`)
       .eq('is_default', true)
       .single();
-    
-    if (error || !agent) {
-      throw new Error(error ? error.message : 'No se encontró agente por defecto');
-    }
 
-    // 2. Buscamos la voz activa dentro del array de configuraciones
-    // Si hay varias, toma la activa. Si no hay activas, toma la primera.
+    if (error || !agent) throw new Error('No se encontró agente');
+
     const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
 
-    if (!voiceConfig) {
-      console.warn('⚠️ El agente no tiene configuración de voz. Usando valores por defecto.');
-    }
-
-    // 3. Mapeamos los datos para que el ThinkingBrain los entienda
-    // Traducimos 'agent_type' de tu BD a 'role' del código
     return {
-      name: agent.name || agent.display_name,
-      role: agent.agent_type || 'Asistente virtual', 
-      language: agent.language || 'es-AR',
-      voice_id: voiceConfig?.voice_id || 'JBFqnCBsd6RMkjVDRZzb', // ID por defecto si falla
-      voice_name: voiceConfig?.voice_name || 'Desconocida'
+      agent: {
+        name: agent.name,
+        role: agent.agent_type || 'Asistente',
+        language: agent.language,
+        silence_timeout: agent.silence_timeout_ms || 1000
+      },
+      voice: {
+        id: voiceConfig?.voice_id || 'eleven_turbo_v2_5',
+        model: 'eleven_turbo_v2_5'
+      }
     };
-
-  } catch (error) {
-    console.error('❌ Error cargando agente:', error.message);
+  } catch (e) {
+    console.error('❌ Error DB:', e.message);
     return null;
   }
 }
 
-wss.on('connection', async (ws, request) => {
+wss.on('connection', async (ws, req) => {
+  console.log('✅ Conexión establecida');
   
-  console.log('✅ Nueva conexión WebSocket establecida');
-  
-  // Cargar agente
-  console.log('📥 Cargando configuración del agente...');
-  agentConfig = await loadAgentConfig();
-  
-  if (agentConfig) {
-    console.log('✅ Agente cargado CORRECTAMENTE:');
-    console.log(`   👤 Nombre: ${agentConfig.name}`);
-    console.log(`   🎭 Rol: ${agentConfig.role}`);
-    console.log(`   🗣️  Voz ID: ${agentConfig.voice_id} (${agentConfig.voice_name})`);
-    console.log(`   🧠 Sistema: THINKING BRAIN`);
-  } else {
-    console.log('⚠️ FALLO CRÍTICO: No se pudo cargar la configuración.');
+  // 1. Cargar Configuración
+  const config = await loadActiveAgent();
+  if (!config) {
+    console.log('❌ Cerrando por falta de configuración');
+    ws.close();
+    return;
   }
+
+  const { agent, voice } = config;
+  const brain = new ThinkingBrain(agent); // Instanciar el cerebro
   
-  ws.on('message', async (data) => {
-    
+  console.log(`🤖 Agente listo: ${agent.name} (${agent.role})`);
+
+  // Variables de Estado (Mecánica del V1)
+  let currentUtterance = [];
+  let silenceTimeoutId = null;
+  let isProcessing = false;
+  let botId = null;
+
+  // --- FUNCIÓN DE HABLAR (Output) ---
+  async function speak(text) {
+    if (!botId) return;
     try {
-      const message = JSON.parse(data);
+      console.log(`🗣️  Generando audio: "${text}"`);
       
-      // Capturar bot ID
-      if (message.type === 'bot.data' && message.data?.bot_id) {
-        currentBotId = message.data.bot_id;
-        console.log(`🤖 Bot ID capturado: ${currentBotId}`);
+      // ElevenLabs
+      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice.id}`, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': process.env.ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: voice.model
+        })
+      });
+      
+      const arrayBuffer = await audioResp.arrayBuffer();
+      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+
+      // Recall.ai
+      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${botId}/output_audio/`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Token ${process.env.RECALL_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
+      });
+      
+      console.log('✅ Audio enviado a la reunión');
+      // Agregamos nuestra propia respuesta al historial del cerebro
+      brain.addToHistory(agent.name, text);
+
+    } catch (e) {
+      console.error('❌ Error generando/enviando audio:', e.message);
+    }
+  }
+
+  // --- PROCESAR FRASE COMPLETA (El puente entre V1 y Brain) ---
+  async function processCompleteUtterance() {
+    if (currentUtterance.length === 0 || isProcessing) return;
+
+    isProcessing = true;
+    
+    // 1. Reconstruir la frase dicha por el humano
+    const fullText = currentUtterance.map(w => w.text).join(' ');
+    const speaker = currentUtterance[0].speakerName || 'Humano';
+    
+    console.log(`📝 Escuchado [${speaker}]: "${fullText}"`);
+    
+    // 2. Alimentar al cerebro
+    brain.addToHistory(speaker, fullText);
+    
+    // 3. PREGUNTAR AL CEREBRO (Aquí está la magia)
+    // Ya no usamos Regex simple, usamos GPT para evaluar si responder
+    const decision = await brain.decideAndRespond(fullText);
+    
+    if (decision.decision === 'SPEAK') {
+      await speak(decision.message);
+    } else {
+      console.log('⏸️  Decisión: Esperar');
+    }
+
+    currentUtterance = []; // Limpiar buffer
+    isProcessing = false;
+  }
+
+  ws.on('message', async (data) => {
+    try {
+      const msg = JSON.parse(data);
+
+      // Capturar ID del Bot
+      if (msg.type === 'bot.data') {
+        botId = msg.data.bot?.id || msg.data.bot_id;
+      }
+
+      // Procesar Transcript (Mecánica V1)
+      if (msg.type === 'transcript.data') {
+        const words = msg.data.data?.words || [];
+        const participant = msg.data.data?.participant;
         
-        // Inicializar brain con bot ID
-        if (agentConfig && !brain) {
-          brain = new ThinkingBrain(agentConfig, currentBotId);
-          console.log('🧠 Thinking Brain inicializado');
+        if (words.length > 0) {
+          // Resetear timeout de silencio
+          if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
+          
+          // Acumular palabras
+          words.forEach(w => {
+            currentUtterance.push({
+              text: w.text,
+              speakerName: participant?.name || 'Desconocido'
+            });
+          });
+
+          // Configurar nuevo timeout (Esperar a que termine la frase)
+          // Usamos el timeout configurado en la BD o 1 segundo por defecto
+          silenceTimeoutId = setTimeout(processCompleteUtterance, agent.silence_timeout);
         }
       }
-      
-      // Ignorar partial data
-      if (message.type === 'transcript.partial_data') {
-        return;
-      }
-      
-      // Procesar transcript
-      if (message.type === 'transcript.data') {
-        
-        if (!brain) {
-          // Silencioso si aún no está listo
-          return;
-        }
-        
-        await brain.onTranscriptData(message.data);
-      }
-      
-    } catch (error) {
-      console.error('❌ Error procesando mensaje:', error.message);
+    } catch (e) {
+      console.error('Error socket:', e);
     }
   });
-  
-  ws.on('close', (code, reason) => {
-    console.log('\n❌ Conexión cerrada');
-    brain = null;
-    currentBotId = null;
-    agentConfig = null;
-  });
-  
-  ws.on('error', (error) => {
-    console.error('❌ Error en WebSocket:', error);
+
+  ws.on('close', () => {
+    console.log('❌ Desconectado');
+    if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
   });
 });
 
-// ════════════════════════════════════════════════════════════════
-// HTTP SERVER
-// ════════════════════════════════════════════════════════════════
+// Servidor HTTP Básico
+app.get('/', (req, res) => res.send('Recall Brain Active 🧠'));
+const server = app.listen(port, () => console.log(`📡 Escuchando en puerto ${port}`));
 
-app.get('/', (req, res) => {
-  res.send('Recall.ai WebSocket Server - Thinking Brain 🧠');
+server.on('upgrade', (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
-
-const server = app.listen(port, () => {
-  console.log(`📡 Servidor HTTP listo en puerto ${port}`);
-});
-
-// Manejo del upgrade de HTTP a WebSocket (Sin restricciones de ruta)
-server.on('upgrade', (request, socket, head) => {
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
-  });
-});
-
-console.log('\n📡 Servidor WebSocket listo - Esperando conexiones...');
-console.log('🧠 Modo: THINKING BRAIN (Inteligencia GPT-4o-mini)');
-console.log('');
