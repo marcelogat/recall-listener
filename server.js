@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FUSIÓN FINAL (CORREGIDO)
+// server.js - FUSIÓN FINAL (Corrección de "Evento undefined")
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -40,7 +40,6 @@ class ThinkingBrain {
 
   addToHistory(speaker, text) {
     this.conversationHistory.push({ speaker, text, time: Date.now() });
-    // Mantenemos solo los últimos 10 mensajes para contexto
     if (this.conversationHistory.length > 10) {
       this.conversationHistory.shift();
     }
@@ -66,10 +65,10 @@ ${context}
 
 TU TAREA:
 Analiza el último mensaje del usuario.
-1. Si es una pregunta para ti o te saludan -> SPEAK.
-2. Si es un comentario donde tu opinión experta suma valor -> SPEAK.
-3. Si el usuario está dudando o cortó la frase -> WAIT.
-4. Si están hablando entre ellos y no te incumbe -> WAIT.
+1. Si es una pregunta directa para ti -> SPEAK.
+2. Si te saludan -> SPEAK.
+3. Si piden tu opinión -> SPEAK.
+4. Si están hablando entre ellos, dudando o hay silencios cortos -> WAIT.
 
 Responde SIEMPRE en formato JSON:
 {
@@ -121,7 +120,6 @@ Responde SIEMPRE en formato JSON:
 
 const wss = new WebSocket.Server({ noServer: true });
 
-// Función para cargar agente de la BD
 async function loadActiveAgent() {
   try {
     const { data: agent, error } = await supabase
@@ -132,7 +130,6 @@ async function loadActiveAgent() {
 
     if (error || !agent) throw new Error('No se encontró agente default');
 
-    // Buscar configuración de voz activa
     const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
 
     return {
@@ -169,7 +166,6 @@ wss.on('connection', async (ws, req) => {
   console.log(`🤖 Agente Activo: ${agent.name} (${agent.role})`);
   console.log(`⏱️  Timeout de silencio: ${agent.silence_timeout}ms`);
 
-  // Variables de estado
   let currentUtterance = [];
   let silenceTimeoutId = null;
   let isProcessing = false;
@@ -250,21 +246,26 @@ wss.on('connection', async (ws, req) => {
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
+      
+      // ✅ LA CORRECCIÓN CLAVE: Detectar 'event' o 'type'
+      const eventType = msg.event || msg.type;
 
-      if (msg.type !== 'transcript.partial_data') {
-         console.log(`📨 Evento: ${msg.type}`);
+      if (eventType !== 'transcript.partial_data') {
+         console.log(`📨 Evento recibido: ${eventType}`);
       }
 
-      if (msg.type === 'bot.data') {
+      // 1. Capturar ID (Bot Data)
+      if (eventType === 'bot.data') {
         botId = msg.data.bot?.id || msg.data.bot_id;
         console.log(`🤖 Bot ID vinculado: ${botId}`);
       }
 
-      if (msg.type === 'transcript.data') {
+      // 2. Procesar Transcript (Datos de audio)
+      if (eventType === 'transcript.data') {
         const words = msg.data.data?.words || [];
         const participant = msg.data.data?.participant;
         
-        console.log(`📊 Transcript recibido: ${words.length} palabras`);
+        console.log(`📊 Transcript: ${words.length} palabras`);
 
         if (words.length > 0) {
           console.log(`   🗣️ "${words.map(w => w.text).join(' ')}"`);
@@ -284,6 +285,7 @@ wss.on('connection', async (ws, req) => {
 
     } catch (e) {
       console.error('❌ Error socket:', e.message);
+      console.log('⚠️ Data corrupta:', data.toString()); // Para ver si llega basura
     }
   });
 
@@ -294,13 +296,12 @@ wss.on('connection', async (ws, req) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// SERVIDOR HTTP (AQUÍ ESTABA EL ERROR)
+// SERVIDOR HTTP
 // ════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => res.send('Recall Brain Active 🧠'));
 const server = app.listen(port, () => console.log(`📡 Servidor escuchando en puerto ${port}`));
 
-// ✅ FIX: Usamos 'req' en ambos lugares
 server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
