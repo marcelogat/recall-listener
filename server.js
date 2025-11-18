@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - Sistema con Thinking Brain (CORREGIDO)
+// server.js - Sistema Thinking Brain (Versión Estable)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -16,14 +16,15 @@ console.log('🧠 Sistema: GPT-4o-mini inteligente');
 console.log('');
 
 // ════════════════════════════════════════════════════════════════
-// SUPABASE CLIENT (Corregido para coincidir con Render)
+// SUPABASE CLIENT (Configurado para tu entorno Render)
 // ════════════════════════════════════════════════════════════════
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY; // Usamos la variable que tienes en Render
+const supabaseKey = process.env.SUPABASE_ANON_KEY; // Variable correcta según tu captura
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ ERROR CRÍTICO: Faltan variables de entorno de Supabase.');
+  console.error('❌ ERROR CRÍTICO: Faltan variables de entorno.');
+  console.error('   Revisa en Render: SUPABASE_URL y SUPABASE_ANON_KEY');
   process.exit(1);
 }
 
@@ -38,7 +39,7 @@ class ThinkingBrain {
   constructor(agentConfig, botId) {
     this.agentName = agentConfig.name;
     this.agentRole = agentConfig.role;
-    this.agentVoice = agentConfig.voice_id;
+    this.agentVoice = agentConfig.voice_id; // Asegúrate que tu tabla agents tenga esta columna
     this.agentLanguage = agentConfig.language;
     this.botId = botId;
     
@@ -456,9 +457,9 @@ Regla: En duda → WAIT
 // WEBSOCKET SERVER
 // ════════════════════════════════════════════════════════════════
 
+// Configuración: noServer true para usarlo con Express, sin path restrictivo
 const wss = new WebSocket.Server({ 
-  noServer: true,
-  path: '/recall-webhook'
+  noServer: true 
 });
 
 let brain = null;
@@ -468,6 +469,7 @@ let agentConfig = null;
 async function loadAgentConfig() {
   try {
     console.log('🔍 Consultando tabla agents en Supabase...');
+    // NOTA: Asegúrate de que tu tabla agents tenga las columnas necesarias
     const { data, error } = await supabase
       .from('agents')
       .select('*')
@@ -485,7 +487,7 @@ async function loadAgentConfig() {
 
 wss.on('connection', async (ws, request) => {
   
-  console.log('✅ Nueva conexión WebSocket desde:', request.socket.remoteAddress);
+  console.log('✅ Nueva conexión WebSocket establecida');
   
   // Cargar agente
   console.log('📥 Cargando configuración del agente...');
@@ -498,7 +500,7 @@ wss.on('connection', async (ws, request) => {
     console.log(`   🗣️  Voz: ${agentConfig.voice_name}`);
     console.log(`   🧠 Sistema: THINKING BRAIN`);
   } else {
-    console.log('⚠️ No se pudo cargar la configuración del agente por defecto.');
+    console.log('⚠️ No se pudo cargar el agente. El sistema puede no responder.');
   }
   
   ws.on('message', async (data) => {
@@ -527,7 +529,7 @@ wss.on('connection', async (ws, request) => {
       if (message.type === 'transcript.data') {
         
         if (!brain) {
-          console.log('⚠️  Brain no inicializado aún (Esperando configuración o Bot ID)');
+          // Silencioso si aún no está listo
           return;
         }
         
@@ -535,14 +537,12 @@ wss.on('connection', async (ws, request) => {
       }
       
     } catch (error) {
-      console.error('❌ Error procesando mensaje:', error);
+      console.error('❌ Error procesando mensaje:', error.message);
     }
   });
   
   ws.on('close', (code, reason) => {
-    console.log('\n❌ Conexión cerrada desde:', request.socket.remoteAddress);
-    console.log(`   Código: ${code}, Razón: ${reason.toString()}`);
-    
+    console.log('\n❌ Conexión cerrada');
     brain = null;
     currentBotId = null;
     agentConfig = null;
@@ -554,7 +554,7 @@ wss.on('connection', async (ws, request) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// HTTP SERVER
+// HTTP SERVER & UPGRADE HANDLING
 // ════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => {
@@ -565,6 +565,7 @@ const server = app.listen(port, () => {
   console.log(`📡 Servidor HTTP listo en puerto ${port}`);
 });
 
+// Manejo de la actualización de protocolo (Upgrade) sin restricciones de ruta
 server.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
     wss.emit('connection', ws, request);
