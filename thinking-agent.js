@@ -130,12 +130,22 @@ class ThinkingAgent {
     const now = Date.now();
     const timeSinceLastThinking = now - this.lastThinkingTime;
 
-    if (timeSinceLastThinking < this.thinkingCooldown) {
+    // Cooldown mínimo de 30 segundos
+    if (timeSinceLastThinking < 30000) {
       return false;
     }
 
-    if (this.conversationBuffer.length < 3) {
+    if (this.conversationBuffer.length < 5) {
       return false;
+    }
+
+    // Pensar solo si hay suficiente contenido nuevo desde el último análisis
+    const newInterventions = this.conversationBuffer.filter(
+      msg => msg.timestamp > this.lastThinkingTime
+    ).length;
+
+    if (newInterventions < 4) {
+      return false; // Esperar más contenido
     }
 
     return true;
@@ -156,8 +166,9 @@ class ThinkingAgent {
       
       this.lastThinkingTime = Date.now();
 
-      // Preparar contexto
+      // Preparar contexto de la conversación reciente (solo últimas 15 intervenciones)
       const conversationText = this.conversationBuffer
+        .slice(-15)
         .map(msg => `${msg.speaker}: ${msg.text}`)
         .join('\n');
 
