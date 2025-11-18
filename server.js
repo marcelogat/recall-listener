@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FASE 1: STREAMING REAL & LATENCIA CERO
+// server.js - FASE 2: STREAMING SINCRONIZADO Y LIMPIO
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,14 +11,13 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// ⚡ AJUSTE FINO DE TIEMPOS
-// 600ms: El equilibrio perfecto. Menos es interrumpir, más es lag.
-const SILENCE_THRESHOLD_MS = 600; 
+// ⚡ TIEMPOS
+const SILENCE_THRESHOLD_MS = 500; 
 
-console.log('🚀 Servidor WebSocket: STREAMING ARCHITECTURE ONLINE');
+console.log('🚀 Servidor WebSocket: STREAMING SINCRONIZADO ONLINE');
 
 // ════════════════════════════════════════════════════════════════
-// 1. SUPABASE (Validación Estricta)
+// 1. SUPABASE
 // ════════════════════════════════════════════════════════════════
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -30,7 +29,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. GESTOR DE STREAMING (El Corazón del Sistema)
+// 2. GESTOR DE STREAMING (Con Buffer Inteligente y Cola)
 // ════════════════════════════════════════════════════════════════
 
 class StreamManager {
@@ -40,7 +39,11 @@ class StreamManager {
     this.botId = botId;
     this.voiceId = voiceConfig.id;
     this.conversationHistory = [];
-    this.isSpeaking = false;
+    
+    // Estado del Stream
+    this.isInterrupted = false; // Bandera de interrupción
+    this.audioQueue = [];       // Cola de audios para no pisarse
+    this.isProcessingQueue = false;
   }
 
   addToHistory(role, text) {
@@ -48,7 +51,6 @@ class StreamManager {
     if (this.conversationHistory.length > 12) this.conversationHistory.shift();
   }
 
-  // Convierte el historial al formato exacto que pide OpenAI
   getFormattedHistory() {
     return this.conversationHistory.map(msg => ({
       role: msg.role === this.agentName ? 'assistant' : 'user',
@@ -56,24 +58,28 @@ class StreamManager {
     }));
   }
 
+  // --- FUNCIÓN DE INTERRUPCIÓN (Barge-In) ---
+  stop() {
+    this.isInterrupted = true;
+    this.audioQueue = []; // Vaciar cola pendiente
+    console.log('🛑 Stream detenido por el usuario.');
+  }
+
   async processUserMessage(userText) {
     if (!userText.trim()) return;
     
     console.log(`📝 Usuario: "${userText}"`);
     this.addToHistory('user', userText);
-    this.isSpeaking = true;
+    this.isInterrupted = false; // Reiniciamos bandera
 
-    // PROMPT DE PERSONALIDAD HUMANA
     const systemPrompt = `
     Eres ${this.agentName}, ${this.agentRole}.
     
-    REGLAS DE ORO PARA PARECER HUMANA:
-    1. RESPUESTA INSTANTÁNEA: Empieza tu frase con un conector natural ("A ver...", "Claro,", "Mmh,", "Entiendo,") para ganar tiempo.
-    2. CONCISIÓN EXTREMA: Habla en oraciones cortas. Nada de párrafos largos.
-    3. CERO FORMALIDAD: No uses "Estimado", "Cordialmente", ni listas con viñetas. Habla como en un café.
-    4. FLUJO: Si te preguntan, responde y devuelve una pregunta corta. Si afirman, valida y agrega un dato.
-    
-    Tu objetivo no es ser una enciclopedia, es ser una buena conversadora.
+    INSTRUCCIONES DE VOZ:
+    1. Responde en frases cortas.
+    2. Usa puntuación clara (.,?) para que tu voz respire.
+    3. Sé natural, como una charla de café.
+    4. NO uses listas ni formatos complejos. Solo texto plano.
     `;
 
     try {
@@ -89,19 +95,19 @@ class StreamManager {
             { role: 'system', content: systemPrompt },
             ...this.getFormattedHistory()
           ],
-          stream: true, // <--- ACTIVAMOS STREAMING
+          stream: true,
           temperature: 0.6,
-          max_tokens: 200
+          max_tokens: 250
         })
       });
 
-      // Procesamiento del Stream de Texto
       const reader = response.body;
-      let textBuffer = "";
+      let sentenceBuffer = ""; // Acumula texto hasta tener sentido
       let fullResponse = "";
-      let sentenceBuffer = "";
 
       for await (const chunk of reader) {
+        if (this.isInterrupted) break; // 🛑 Cortar si el usuario habló
+
         const chunkString = chunk.toString();
         const lines = chunkString.split('\n').filter(line => line.trim() !== '');
 
@@ -113,79 +119,114 @@ class StreamManager {
               const content = data.choices[0].delta.content;
               
               if (content) {
-                textBuffer += content;
-                sentenceBuffer += content;
                 fullResponse += content;
+                sentenceBuffer += content;
 
-                // HEURÍSTICA DE CORTE:
-                // Enviamos a audio apenas tenemos un signo de puntuación fuerte
-                // Esto hace que el audio empiece a sonar mientras GPT sigue escribiendo.
-                if (sentenceBuffer.match(/[.,?!;]/) && sentenceBuffer.length > 5) {
-                  console.log(`⚡ Chunk a Audio: "${sentenceBuffer.trim()}"`);
-                  await this.streamAudioChunk(sentenceBuffer);
-                  sentenceBuffer = ""; // Limpiamos buffer parcial
+                // 🧠 BUFFER INTELIGENTE:
+                // Solo cortamos si hay un signo de puntuación Y un espacio después (o fin de línea)
+                // Esto evita cortar "Sra." o "1.5" o palabras a medias.
+                // Buscamos: (Puntuación) + (Espacio o fin)
+                
+                // Regex: Busca [.?!;] seguido de un espacio o el final
+                // Pero para simplificar y ser rápidos:
+                // Si encontramos un signo de cierre fuerte, intentamos enviar.
+                
+                if (sentenceBuffer.match(/[.?!;]\s/) || (sentenceBuffer.match(/[.?!;]/) && sentenceBuffer.length > 20)) {
+                   // Cortamos en el último signo de puntuación encontrado
+                   const lastPunctuationIndex = Math.max(
+                     sentenceBuffer.lastIndexOf('.'),
+                     sentenceBuffer.lastIndexOf('?'),
+                     sentenceBuffer.lastIndexOf('!'),
+                     sentenceBuffer.lastIndexOf(';')
+                   );
+
+                   if (lastPunctuationIndex !== -1) {
+                     const completeSentence = sentenceBuffer.substring(0, lastPunctuationIndex + 1);
+                     const remainder = sentenceBuffer.substring(lastPunctuationIndex + 1);
+                     
+                     if (completeSentence.trim().length > 2) { // Evitar enviar solo "."
+                        console.log(`⚡ Frase a Audio: "${completeSentence.trim()}"`);
+                        this.queueAudio(completeSentence.trim());
+                        sentenceBuffer = remainder;
+                     }
+                   }
                 }
               }
-            } catch (e) {
-              // Ignorar errores de parseo en chunks parciales
-            }
+            } catch (e) {}
           }
         }
       }
 
-      // Enviar lo que haya quedado en el buffer final
-      if (sentenceBuffer.trim().length > 0) {
-        await this.streamAudioChunk(sentenceBuffer);
+      // Enviar remanente si quedó algo en el tintero
+      if (sentenceBuffer.trim().length > 0 && !this.isInterrupted) {
+        this.queueAudio(sentenceBuffer.trim());
       }
 
-      // Guardamos la respuesta completa en la memoria
-      this.addToHistory(this.agentName, fullResponse);
-      this.isSpeaking = false;
-      console.log('✅ Respuesta completada.');
+      if (!this.isInterrupted) {
+          this.addToHistory(this.agentName, fullResponse);
+      }
 
     } catch (error) {
-      console.error('❌ Error en Stream:', error);
-      this.isSpeaking = false;
+      console.error('❌ Error Stream:', error.message);
     }
   }
 
-  async streamAudioChunk(text) {
-    try {
-      const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': process.env.ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          text: text,
-          model_id: 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.4, similarity_boost: 0.8 }, // Stability baja = más expresividad variable
-          optimize_streaming_latency: 4 // MÁXIMA PRIORIDAD
-        })
-      });
+  // --- COLA SECUENCIAL DE AUDIO ---
+  async queueAudio(text) {
+    this.audioQueue.push(text);
+    this.processQueue();
+  }
 
-      if (!audioResp.ok) throw new Error(`ElevenLabs Error: ${audioResp.status}`);
+  async processQueue() {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
 
-      const arrayBuffer = await audioResp.arrayBuffer();
-      const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+    while (this.audioQueue.length > 0) {
+      if (this.isInterrupted) {
+          this.audioQueue = [];
+          break;
+      }
 
-      // Enviamos el chunk de audio a Recall
-      // Recall gestiona su propio buffer, así que podemos enviarlos secuencialmente
-      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
-        method: 'POST',
-        headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
-      });
-
-    } catch (e) {
-      console.error('⚠️ Error generando audio chunk:', e.message);
+      const text = this.audioQueue.shift();
+      try {
+        await this.generateAndSendAudio(text);
+      } catch (e) {
+        console.error('Audio Gen Error:', e.message);
+      }
     }
+
+    this.isProcessingQueue = false;
+  }
+
+  async generateAndSendAudio(text) {
+    const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': process.env.ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+        optimize_streaming_latency: 4
+      })
+    });
+
+    if (!audioResp.ok) throw new Error(`ElevenLabs: ${audioResp.status}`);
+    const arrayBuffer = await audioResp.arrayBuffer();
+    const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+
+    await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
+      method: 'POST',
+      headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
+    });
   }
 }
 
 // ════════════════════════════════════════════════════════════════
-// 3. SERVIDOR WEBSOCKET (Lógica de Conexión)
+// 3. SERVIDOR WEBSOCKET
 // ════════════════════════════════════════════════════════════════
 
 const wss = new WebSocket.Server({ noServer: true });
@@ -226,35 +267,30 @@ wss.on('connection', async (ws, req) => {
     try {
       const msg = JSON.parse(data);
 
-      // 1. Inicialización (Captura de ID)
+      // 1. Inicialización
       if (!botId && msg.data?.bot?.id) {
         botId = msg.data.bot.id;
         console.log(`🤖 Bot ID: ${botId}`);
         streamManager = new StreamManager(config.agent, botId, config.voice);
       }
 
-      // 2. Procesamiento de Audio (Transcript)
+      // 2. Audio
       if ((msg.event || msg.type) === 'transcript.data') {
         const words = msg.data.data?.words || [];
         
         if (words.length > 0) {
-          // Si el bot está hablando, NO escuchamos (evita auto-escucha y loop)
-          if (streamManager && streamManager.isSpeaking) return;
+          // 🛑 INTERRUPCIÓN: Si el usuario habla, CORTAMOS al bot
+          if (streamManager) streamManager.stop();
 
-          // Cancelamos el timer de silencio porque el usuario sigue hablando
           if (silenceTimer) clearTimeout(silenceTimer);
 
-          words.forEach(w => {
-            currentUtterance.push(w.text);
-          });
+          words.forEach(w => currentUtterance.push(w.text));
 
-          // Reiniciamos el timer
           silenceTimer = setTimeout(() => {
             if (currentUtterance.length > 0 && streamManager) {
               const fullText = currentUtterance.join(' ');
-              currentUtterance = []; // Limpiar buffer inmediatamente
-              
-              // Disparar el proceso de streaming
+              currentUtterance = []; 
+              // Disparar respuesta
               streamManager.processUserMessage(fullText);
             }
           }, SILENCE_THRESHOLD_MS);
@@ -272,10 +308,10 @@ wss.on('connection', async (ws, req) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// 4. SERVIDOR HTTP
+// 4. HTTP
 // ════════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.send('Recall Streaming Core v1.0'));
+app.get('/', (req, res) => res.send('Recall Sync Core v2.0'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
 
 server.on('upgrade', (req, socket, head) => {
