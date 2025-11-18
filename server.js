@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - MODO INSTANTÁNEO (Cero Lag)
+// server.js - MODO LÍDER PROACTIVO (Facilitador de Reuniones)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,16 +11,15 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// ⚡ CONFIGURACIÓN DE VELOCIDAD
-// 400ms es lo que tardas en tomar aire. Si paras 0.4s, la IA asume que terminaste.
-const AGGRESSIVE_SILENCE_MS = 400; 
+// ⚡ CONFIGURACIÓN DE LIDERAZGO
+const AGGRESSIVE_SILENCE_MS = 600; // Tiempo para asumir fin de frase usuario
+const SOCIAL_CHECK_MS = 4000;      // 4s de silencio = El bot toma el mando
 
-console.log('🚀 Servidor WebSocket: MODO INSTANTÁNEO ACTIVADO');
+console.log('🚀 Servidor WebSocket: MODO LÍDER ACTIVADO');
 
 // ════════════════════════════════════════════════════════════════
-// 1. CONFIGURACIÓN SUPABASE
+// 1. SUPABASE
 // ════════════════════════════════════════════════════════════════
-
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
@@ -28,11 +27,10 @@ if (!supabaseUrl || !supabaseKey) {
   console.error('❌ ERROR: Faltan variables SUPABASE.');
   process.exit(1);
 }
-
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. CEREBRO ULTRARÁPIDO
+// 2. CEREBRO LÍDER (Prompt de Conducción)
 // ════════════════════════════════════════════════════════════════
 
 class ThinkingBrain {
@@ -44,31 +42,39 @@ class ThinkingBrain {
 
   addToHistory(speaker, text) {
     this.conversationHistory.push({ speaker, text, time: Date.now() });
-    if (this.conversationHistory.length > 6) this.conversationHistory.shift();
+    if (this.conversationHistory.length > 20) this.conversationHistory.shift();
   }
 
   getContext() {
-    return this.conversationHistory
-      .map(m => `[${m.speaker}]: ${m.text}`)
-      .join('\n');
+    return this.conversationHistory.map(m => `[${m.speaker}]: ${m.text}`).join('\n');
   }
 
-  async decideAndRespond(lastUserMessage) {
-    // console.log('⚡ Analizando...'); // Comentado para limpiar log
-    const startTime = Date.now();
-    
+  async decideAndRespond(triggerType, textInput = "") {
     const context = this.getContext();
-    
-    // Prompt diseñado para que GPT-4o-mini lea lo menos posible y responda YA.
+    console.log(`🧠 Liderando (${triggerType})...`);
+
+    // 🧠 EL SECRETO ESTÁ AQUÍ: INSTRUCCIONES DE LIDERAZGO
     const prompt = `
-Eres ${this.agentName}, ${this.agentRole}.
-CHAT:
+Eres ${this.agentName}, actuando como ${this.agentRole}.
+Tu rol NO es solo responder. Tu rol es LIDERAR y FACILITAR la conversación.
+
+HISTORIAL:
 ${context}
 
-Si te hablan, te saludan o piden opinión: RESPONDÉ CORTO Y NATURAL.
-Si no: ESPERÁ.
+SITUACIÓN ACTUAL: "${triggerType === 'SILENCE_CHECK' ? '[SILENCIO EN LA SALA - LA REUNIÓN SE ESTANCÓ]' : textInput}"
 
-JSON: {"decision": "SPEAK"|"WAIT", "message": "respuesta"}
+OBJETIVOS:
+1. NUNCA termines con una respuesta cerrada ("Sí, claro."). SIEMPRE devuelve la pelota ("Sí, claro. ¿Y tú cómo ves ese punto?").
+2. Si el usuario da una respuesta corta, INDAGA MÁS ("¿Podrías darme un ejemplo?", "Cuéntame más sobre eso").
+3. Si hay silencio, PROPÓN un nuevo tema relacionado o haz una pregunta provocadora.
+4. Mantén la energía alta. Eres proactivo/a, no pasivo/a.
+
+FORMATO JSON:
+1. "decision": "SPEAK" (Casi siempre, a menos que te interrumpan) o "WAIT".
+2. "reflex": Reacción inmediata (1-3 palabras) para ganar el turno ("Excelente punto,", "Entiendo,", "A ver...", "Oye,").
+3. "message": El contenido principal + LA PREGUNTA DE CIERRE (Hook).
+
+Ejemplo: {"decision": "SPEAK", "reflex": "Qué interesante,", "message": "coincido totalmente. Ahora bien, ¿cómo crees que esto impacta en el equipo?"}
 `;
 
     try {
@@ -81,21 +87,17 @@ JSON: {"decision": "SPEAK"|"WAIT", "message": "respuesta"}
         body: JSON.stringify({
           model: 'gpt-4o-mini', 
           messages: [
-            { role: 'system', content: 'Eres rápido.' }, 
+            { role: 'system', content: 'Eres un líder de reunión carismático y proactivo.' }, 
             { role: 'user', content: prompt }
           ],
-          temperature: 0.6,
-          max_tokens: 100, // Respuesta ultra corta para velocidad
+          temperature: 0.7, // Creatividad para sacar temas
+          max_tokens: 250,
           response_format: { type: "json_object" }
         })
       });
 
       const data = await response.json();
-      const content = JSON.parse(data.choices[0].message.content);
-      
-      const time = Date.now() - startTime;
-      console.log(`⚡ Decisión en ${time}ms: ${content.decision}`);
-      return content;
+      return JSON.parse(data.choices[0].message.content);
 
     } catch (error) {
       console.error('❌ Err cerebro:', error.message);
@@ -105,7 +107,7 @@ JSON: {"decision": "SPEAK"|"WAIT", "message": "respuesta"}
 }
 
 // ════════════════════════════════════════════════════════════════
-// 3. SERVIDOR
+// 3. SERVIDOR (Lógica de Flujo)
 // ════════════════════════════════════════════════════════════════
 
 const wss = new WebSocket.Server({ noServer: true });
@@ -119,47 +121,44 @@ async function loadActiveAgent() {
       .single();
 
     if (error || !agent) throw new Error('No agent found');
-
     const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
 
     return {
-      agent: {
-        name: agent.name,
-        role: agent.agent_type,
-        language: agent.language
-      },
-      voice: {
-        id: voiceConfig?.voice_id || 'eleven_turbo_v2_5',
-        model: 'eleven_turbo_v2_5'
-      }
+      agent: { name: agent.name, role: agent.agent_type },
+      voice: { id: voiceConfig?.voice_id || 'eleven_turbo_v2_5', model: 'eleven_turbo_v2_5' }
     };
   } catch (e) {
-    console.error('Error DB:', e.message);
+    console.error('DB Error:', e.message);
     return null;
   }
 }
 
 wss.on('connection', async (ws, req) => {
   console.log('✅ Conexión OK');
-  
   const config = await loadActiveAgent();
   if (!config) { ws.close(); return; }
 
   const { agent, voice } = config;
   const brain = new ThinkingBrain(agent);
   
-  // Ignoramos el timeout de la DB y usamos el agresivo
-  console.log(`🏎️  Agente: ${agent.name} | Timeout: ${AGGRESSIVE_SILENCE_MS}ms (Hardcoded)`);
+  console.log(`👑 Agente Líder: ${agent.name} | Init: ${SOCIAL_CHECK_MS}ms`);
 
   let currentUtterance = [];
-  let silenceTimeoutId = null;
+  let processingTimeoutId = null;
+  let socialCheckTimeoutId = null;
   let botId = null;
+  let audioQueue = []; 
+  let isPlayingAudio = false;
 
-  // --- Output Audio ---
-  async function speak(text) {
-    if (!botId) return;
+  // --- COLA DE AUDIO ---
+  async function processAudioQueue() {
+    if (isPlayingAudio || audioQueue.length === 0) return;
+    isPlayingAudio = true;
+
+    const { text, resolve } = audioQueue.shift();
+    
     try {
-      console.log(`🗣️  Generando...`);
+      console.log(`🔊 On Air: "${text}"`);
       
       const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice.id}/stream`, {
         method: 'POST',
@@ -169,12 +168,12 @@ wss.on('connection', async (ws, req) => {
         },
         body: JSON.stringify({
           text: text,
-          model_id: 'eleven_turbo_v2_5',
+          model: 'eleven_turbo_v2_5',
           voice_settings: { stability: 0.5, similarity_boost: 0.8 },
-          optimize_streaming_latency: 4 // MÁXIMA PRIORIDAD LATENCIA
+          optimize_streaming_latency: 4 
         })
       });
-      
+
       const arrayBuffer = await audioResp.arrayBuffer();
       const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
@@ -183,16 +182,50 @@ wss.on('connection', async (ws, req) => {
         headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
       });
-      
-      console.log('✅ Enviado');
-      brain.addToHistory(agent.name, text);
+
+      const duration = Math.max(1000, (text.length / 15) * 1000); 
+      setTimeout(() => {
+        isPlayingAudio = false;
+        if (resolve) resolve();
+        processAudioQueue(); 
+      }, duration);
 
     } catch (e) {
-      console.error('Err Audio:', e.message);
+      console.error('Audio Error:', e);
+      isPlayingAudio = false;
+      processAudioQueue();
     }
   }
 
-  // --- Procesar ---
+  function queueSpeak(text) {
+    return new Promise((resolve) => {
+      audioQueue.push({ text, resolve });
+      processAudioQueue();
+    });
+  }
+
+  // --- Reiniciar Vigilancia ---
+  function resetSocialTimer() {
+    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
+    // Solo activamos vigilancia si NO se está reproduciendo audio
+    if (!isPlayingAudio && audioQueue.length === 0) {
+      socialCheckTimeoutId = setTimeout(performSocialCheck, SOCIAL_CHECK_MS);
+    }
+  }
+
+  // --- Chequeo de Silencio (El bot toma la iniciativa) ---
+  async function performSocialCheck() {
+    const decision = await brain.decideAndRespond('SILENCE_CHECK');
+    if (decision.decision === 'SPEAK') {
+        console.log('⚡ ROMPIENDO EL SILENCIO');
+        if (decision.reflex) queueSpeak(decision.reflex);
+        if (decision.message) queueSpeak(decision.message).then(resetSocialTimer);
+    } else {
+        resetSocialTimer();
+    }
+  }
+
+  // --- Procesar Input Humano ---
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0) return;
     
@@ -200,27 +233,34 @@ wss.on('connection', async (ws, req) => {
     const speaker = currentUtterance[0].speakerName || 'Usuario';
     
     console.log(`📝 Escuchado: "${fullText}"`);
-    
-    // Limpiamos buffer INMEDIATAMENTE para evitar procesar doble
-    currentUtterance = [];
-    
+    currentUtterance = []; 
+    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
+
     brain.addToHistory(speaker, fullText);
-    const decision = await brain.decideAndRespond(fullText);
+    
+    const decision = await brain.decideAndRespond('USER_INPUT', fullText);
     
     if (decision.decision === 'SPEAK') {
-      await speak(decision.message);
-    } 
+      if (decision.reflex) {
+        console.log(`⚡ Reflejo: "${decision.reflex}"`);
+        queueSpeak(decision.reflex); 
+      }
+      if (decision.message) {
+        console.log(`💬 Mensaje: "${decision.message}"`);
+        queueSpeak(decision.message).then(resetSocialTimer);
+      }
+    } else {
+      resetSocialTimer();
+    }
   }
 
-  // --- Mensajes ---
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
-      
-      // Captura ID agresiva
       if (!botId && msg.data?.bot?.id) {
         botId = msg.data.bot.id;
         console.log(`✅ ID: ${botId}`);
+        resetSocialTimer(); // Inicia vigilancia apenas entra
       }
 
       if ((msg.event || msg.type) === 'transcript.data') {
@@ -228,8 +268,12 @@ wss.on('connection', async (ws, req) => {
         const participant = msg.data.data?.participant;
         
         if (words.length > 0) {
-          // Si llegan palabras nuevas, cancelamos el timeout anterior (el usuario sigue hablando)
-          if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
+          // Interrupción: Limpiamos todo
+          if (processingTimeoutId) clearTimeout(processingTimeoutId);
+          if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
+          
+          // Opcional: Si quieres que el bot se calle si lo interrumpen:
+          // audioQueue = []; 
           
           words.forEach(w => {
             currentUtterance.push({
@@ -237,26 +281,18 @@ wss.on('connection', async (ws, req) => {
               speakerName: participant?.name || 'Desconocido'
             });
           });
-
-          // Aquí está la magia: Esperamos solo 400ms. 
-          // Si no llegan más palabras en 0.4s, asumimos que terminó y procesamos YA.
-          silenceTimeoutId = setTimeout(processCompleteUtterance, AGGRESSIVE_SILENCE_MS);
+          processingTimeoutId = setTimeout(processCompleteUtterance, AGGRESSIVE_SILENCE_MS);
         }
       }
-
-    } catch (e) {
-      console.error('Err:', e.message);
-    }
+    } catch (e) { console.error(e); }
   });
 
   ws.on('close', () => {
-    if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
+    if (processingTimeoutId) clearTimeout(processingTimeoutId);
+    if (socialCheckTimeoutId) clearTimeout(socialCheckTimeoutId);
   });
 });
 
-app.get('/', (req, res) => res.send('Instant Brain 🧠'));
+app.get('/', (req, res) => res.send('Leader Brain 🧠'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
-
-server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
-});
+server.on('upgrade', (req, socket, head) => wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)));
