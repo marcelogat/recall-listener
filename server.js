@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - Sistema Thinking Brain (Versión Estable)
+// server.js - Sistema Thinking Brain (Versión Final Integrada)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -16,11 +16,11 @@ console.log('🧠 Sistema: GPT-4o-mini inteligente');
 console.log('');
 
 // ════════════════════════════════════════════════════════════════
-// SUPABASE CLIENT (Configurado para tu entorno Render)
+// SUPABASE CLIENT
 // ════════════════════════════════════════════════════════════════
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY; // Variable correcta según tu captura
+const supabaseKey = process.env.SUPABASE_ANON_KEY; // Usamos la variable de Render
 
 if (!supabaseUrl || !supabaseKey) {
   console.error('❌ ERROR CRÍTICO: Faltan variables de entorno.');
@@ -38,8 +38,8 @@ class ThinkingBrain {
   
   constructor(agentConfig, botId) {
     this.agentName = agentConfig.name;
-    this.agentRole = agentConfig.role;
-    this.agentVoice = agentConfig.voice_id; // Asegúrate que tu tabla agents tenga esta columna
+    this.agentRole = agentConfig.role;     // Viene de agent_type
+    this.agentVoice = agentConfig.voice_id; // Viene de agent_voice_config
     this.agentLanguage = agentConfig.language;
     this.botId = botId;
     
@@ -457,7 +457,6 @@ Regla: En duda → WAIT
 // WEBSOCKET SERVER
 // ════════════════════════════════════════════════════════════════
 
-// Configuración: noServer true para usarlo con Express, sin path restrictivo
 const wss = new WebSocket.Server({ 
   noServer: true 
 });
@@ -466,19 +465,47 @@ let brain = null;
 let currentBotId = null;
 let agentConfig = null;
 
+// ════════════════════════════════════════════════════════════════
+// FUNCIÓN DE CARGA DE AGENTE (CORREGIDA)
+// ════════════════════════════════════════════════════════════════
+
 async function loadAgentConfig() {
   try {
-    console.log('🔍 Consultando tabla agents en Supabase...');
-    // NOTA: Asegúrate de que tu tabla agents tenga las columnas necesarias
-    const { data, error } = await supabase
+    console.log('🔍 Consultando tabla agents y agent_voice_config...');
+    
+    // 1. Pedimos el agente y su configuración de voz unida
+    // IMPORTANTE: Usamos 'agent_voice_config' porque es el nombre de tu tabla relacionada
+    const { data: agent, error } = await supabase
       .from('agents')
-      .select('*')
+      .select(`
+        *,
+        agent_voice_config (*)
+      `)
       .eq('is_default', true)
       .single();
     
-    if (error) throw error;
-    
-    return data;
+    if (error || !agent) {
+      throw new Error(error ? error.message : 'No se encontró agente por defecto');
+    }
+
+    // 2. Buscamos la voz activa dentro del array de configuraciones
+    // Si hay varias, toma la activa. Si no hay activas, toma la primera.
+    const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
+
+    if (!voiceConfig) {
+      console.warn('⚠️ El agente no tiene configuración de voz. Usando valores por defecto.');
+    }
+
+    // 3. Mapeamos los datos para que el ThinkingBrain los entienda
+    // Traducimos 'agent_type' de tu BD a 'role' del código
+    return {
+      name: agent.name || agent.display_name,
+      role: agent.agent_type || 'Asistente virtual', 
+      language: agent.language || 'es-AR',
+      voice_id: voiceConfig?.voice_id || 'JBFqnCBsd6RMkjVDRZzb', // ID por defecto si falla
+      voice_name: voiceConfig?.voice_name || 'Desconocida'
+    };
+
   } catch (error) {
     console.error('❌ Error cargando agente:', error.message);
     return null;
@@ -494,13 +521,13 @@ wss.on('connection', async (ws, request) => {
   agentConfig = await loadAgentConfig();
   
   if (agentConfig) {
-    console.log('✅ Agente cargado:');
+    console.log('✅ Agente cargado CORRECTAMENTE:');
     console.log(`   👤 Nombre: ${agentConfig.name}`);
-    console.log(`   🎭 Tipo: ${agentConfig.type || agentConfig.role}`);
-    console.log(`   🗣️  Voz: ${agentConfig.voice_name}`);
+    console.log(`   🎭 Rol: ${agentConfig.role}`);
+    console.log(`   🗣️  Voz ID: ${agentConfig.voice_id} (${agentConfig.voice_name})`);
     console.log(`   🧠 Sistema: THINKING BRAIN`);
   } else {
-    console.log('⚠️ No se pudo cargar el agente. El sistema puede no responder.');
+    console.log('⚠️ FALLO CRÍTICO: No se pudo cargar la configuración.');
   }
   
   ws.on('message', async (data) => {
@@ -554,7 +581,7 @@ wss.on('connection', async (ws, request) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// HTTP SERVER & UPGRADE HANDLING
+// HTTP SERVER
 // ════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => {
@@ -565,7 +592,7 @@ const server = app.listen(port, () => {
   console.log(`📡 Servidor HTTP listo en puerto ${port}`);
 });
 
-// Manejo de la actualización de protocolo (Upgrade) sin restricciones de ruta
+// Manejo del upgrade de HTTP a WebSocket (Sin restricciones de ruta)
 server.on('upgrade', (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
     wss.emit('connection', ws, request);
