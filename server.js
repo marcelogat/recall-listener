@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FUSIÓN FINAL (Corrección de "Evento undefined")
+// server.js - FUSIÓN FINAL (Corrección Bot ID)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -174,7 +174,7 @@ wss.on('connection', async (ws, req) => {
   // --- Output Audio ---
   async function speak(text) {
     if (!botId) {
-      console.error('⚠️ No puedo hablar: Falta Bot ID');
+      console.error('⚠️ ERROR AL HABLAR: No tengo Bot ID aún.');
       return;
     }
     try {
@@ -246,21 +246,20 @@ wss.on('connection', async (ws, req) => {
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
-      
-      // ✅ LA CORRECCIÓN CLAVE: Detectar 'event' o 'type'
       const eventType = msg.event || msg.type;
 
       if (eventType !== 'transcript.partial_data') {
          console.log(`📨 Evento recibido: ${eventType}`);
       }
 
-      // 1. Capturar ID (Bot Data)
-      if (eventType === 'bot.data') {
-        botId = msg.data.bot?.id || msg.data.bot_id;
-        console.log(`🤖 Bot ID vinculado: ${botId}`);
+      // 🔴 CORRECCIÓN CLAVE: CAPTURA DE ID AL ESTILO ORIGINAL
+      // No esperamos un evento "bot.data", buscamos el ID donde sea que aparezca
+      if (!botId && msg.data?.bot?.id) {
+        botId = msg.data.bot.id;
+        console.log(`✅ Bot ID capturado exitosamente: ${botId}`);
       }
 
-      // 2. Procesar Transcript (Datos de audio)
+      // 2. Procesar Transcript
       if (eventType === 'transcript.data') {
         const words = msg.data.data?.words || [];
         const participant = msg.data.data?.participant;
@@ -285,7 +284,6 @@ wss.on('connection', async (ws, req) => {
 
     } catch (e) {
       console.error('❌ Error socket:', e.message);
-      console.log('⚠️ Data corrupta:', data.toString()); // Para ver si llega basura
     }
   });
 
