@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FASE 6: SINGLE SHOT (Audio Entero y Fluido)
+// server.js - FASE 7: ESTABILIDAD Y CONCURRENCIA (FIX FINAL)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -13,9 +13,9 @@ const port = process.env.PORT || 8080;
 
 // ⚡ TIEMPOS
 const SILENCE_THRESHOLD_MS = 600; 
-const FIRST_MESSAGE_DELAY_MS = 1500; // Tiempo para desmutearse al inicio
+const FIRST_MESSAGE_DELAY_MS = 1500; 
 
-console.log('🚀 Servidor WebSocket: SINGLE SHOT AUDIO ONLINE');
+console.log('🚀 Servidor WebSocket: ESTABILIDAD DE CONCURRENCIA OK');
 
 // ════════════════════════════════════════════════════════════════
 // 1. SUPABASE
@@ -30,7 +30,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. GESTOR DE RESPUESTA (Sin Particiones)
+// 2. GESTOR DE RESPUESTA (Con Candado de Procesamiento)
 // ════════════════════════════════════════════════════════════════
 
 class StreamManager {
@@ -41,7 +41,8 @@ class StreamManager {
     this.voiceId = voiceConfig.id;
     this.conversationHistory = [];
     
-    this.isProcessing = false;
+    // ESTADO CRÍTICO PARA CONCURRENCIA
+    this.isProcessing = false; // 🔴 CANDADO: Si es true, ignoramos nuevos inputs
     this.isFirstInteraction = true; 
     this.isInterrupted = false;
   }
@@ -60,29 +61,30 @@ class StreamManager {
 
   stop() {
     this.isInterrupted = true;
-    this.isProcessing = false;
     console.log('🛑 Interrupción.');
   }
 
   async processUserMessage(userText) {
-    if (!userText.trim()) return;
+    if (this.isProcessing) {
+        console.log('🔒 ERROR DE CONCURRENCIA: Ya estoy pensando. Ignorando input.');
+        return; 
+    }
+    this.isProcessing = true; // 🔒 Bloqueamos el sistema
     
     console.log(`📝 Usuario: "${userText}"`);
     this.addToHistory('user', userText);
-    
     this.isInterrupted = false; 
-    this.isProcessing = true;
 
     const systemPrompt = `
     Eres ${this.agentName}, ${this.agentRole}.
     INSTRUCCIONES:
     1. Responde de forma natural y conversacional.
-    2. NO hagas listas. Usa párrafos cortos.
-    3. Sé cálida y directa.
+    2. Mantente conciso.
+    3. Finaliza siempre con una pregunta o un gancho para mantener el flujo.
     `;
 
     try {
-      // 1. OBTENER TEXTO COMPLETO DE GPT (Esperamos la idea completa)
+      // 1. OBTENER TEXTO COMPLETO DE GPT
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -96,18 +98,18 @@ class StreamManager {
             ...this.getFormattedHistory()
           ],
           temperature: 0.7,
-          max_tokens: 250 // Respuesta concisa
+          max_tokens: 250 
         })
       });
 
       const data = await response.json();
       
-      if (this.isInterrupted) return; // Si el usuario habló mientras pensábamos, cancelamos
+      if (this.isInterrupted) return; 
 
       const fullText = data.choices[0].message.content;
       console.log(`🧠 Respuesta GPT: "${fullText}"`);
 
-      // 2. GENERAR UN SOLO AUDIO (Fluidez garantizada)
+      // 2. GENERAR UN SOLO AUDIO
       await this.generateAndSendAudio(fullText);
 
       if (!this.isInterrupted) {
@@ -117,14 +119,13 @@ class StreamManager {
     } catch (error) {
       console.error('❌ Error Proceso:', error.message);
     } finally {
-      this.isProcessing = false;
+      this.isProcessing = false; // 🔓 Liberamos el candado al finalizar
     }
   }
 
   async generateAndSendAudio(text) {
     if (this.isInterrupted) return;
 
-    // 🟢 FIX DE ARRANQUE: Espera antes del primer audio
     if (this.isFirstInteraction) {
       console.log(`🔌 Calentando motores (${FIRST_MESSAGE_DELAY_MS}ms)...`);
       await new Promise(resolve => setTimeout(resolve, FIRST_MESSAGE_DELAY_MS));
@@ -153,7 +154,6 @@ class StreamManager {
       const arrayBuffer = await audioResp.arrayBuffer();
       const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
-      // Enviamos el paquete único a Recall
       await fetch(`https://us-west-2.recall.ai/api/v1/bot/${this.botId}/output_audio/`, {
         method: 'POST',
         headers: { 'Authorization': `Token ${process.env.RECALL_API_KEY}`, 'Content-Type': 'application/json' },
@@ -219,7 +219,7 @@ wss.on('connection', async (ws, req) => {
         const words = msg.data.data?.words || [];
         
         if (words.length > 0) {
-          // 🛑 SI EL USUARIO HABLA, CORTAMOS TODO
+          // 🛑 SI EL USUARIO HABLA, CORTAMOS EL AUDIO ANTERIOR Y LIMPIAMOS TIMER
           if (streamManager) streamManager.stop();
           
           if (silenceTimer) clearTimeout(silenceTimer);
@@ -249,7 +249,7 @@ wss.on('connection', async (ws, req) => {
 // 4. HTTP
 // ════════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.send('Single Shot Core v6.0'));
+app.get('/', (req, res) => res.send('Single Shot Core v7.0 (Stable)'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
 
 server.on('upgrade', (req, socket, head) => {
