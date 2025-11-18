@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FASE 3: STREAMING SINCRONIZADO (Anti-Superposición)
+// server.js - FASE 5: PROD READY (Fluidez + Fix Primer Audio)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,11 +11,13 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// ⚡ CALIBRACIÓN DE TIEMPOS
+// ⚡ CALIBRACIÓN DE FLUIDEZ
 const SILENCE_THRESHOLD_MS = 600; 
-const CHARS_PER_SECOND = 16; // Velocidad promedio de habla (ajustar para más/menos velocidad)
+const CHARS_PER_SECOND = 15; 
+const MIN_CHUNK_LENGTH = 50; 
+const FIRST_MESSAGE_DELAY_MS = 1200; // 🟢 TIEMPO EXTRA PARA EL PRIMER DESMUTEO
 
-console.log('🚀 Servidor WebSocket: AUDIO SYNC ENGINE ONLINE');
+console.log('🚀 Servidor WebSocket: PRODUCTION READY');
 
 // ════════════════════════════════════════════════════════════════
 // 1. SUPABASE
@@ -30,7 +32,7 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. GESTOR DE STREAMING (Con Cola de Tiempo Real)
+// 2. GESTOR DE STREAMING
 // ════════════════════════════════════════════════════════════════
 
 class StreamManager {
@@ -41,11 +43,13 @@ class StreamManager {
     this.voiceId = voiceConfig.id;
     this.conversationHistory = [];
     
-    // Cola de Reproducción
     this.audioQueue = []; 
     this.isProcessingQueue = false;
-    this.currentWaitTimer = null; // Para poder cancelar la espera si interrumpen
+    this.currentWaitTimer = null;
     this.isInterrupted = false;
+    
+    // 🟢 ESTADO PARA EL FIX DEL PRIMER AUDIO
+    this.isFirstInteraction = true; 
   }
 
   addToHistory(role, text) {
@@ -60,16 +64,15 @@ class StreamManager {
     }));
   }
 
-  // 🛑 BOTÓN DE PÁNICO (Interrupción)
   stop() {
     this.isInterrupted = true;
-    this.audioQueue = []; // Borrar frases pendientes
+    this.audioQueue = []; 
     if (this.currentWaitTimer) {
-      clearTimeout(this.currentWaitTimer); // Cancelar espera actual
+      clearTimeout(this.currentWaitTimer);
       this.currentWaitTimer = null;
     }
     this.isProcessingQueue = false;
-    console.log('🛑 Stream interrumpido. Silencio total.');
+    console.log('🛑 Interrupción.');
   }
 
   async processUserMessage(userText) {
@@ -81,10 +84,10 @@ class StreamManager {
 
     const systemPrompt = `
     Eres ${this.agentName}, ${this.agentRole}.
-    INSTRUCCIONES:
-    1. Responde como un humano, usando frases cortas.
-    2. Separa tus ideas con puntos seguidos.
-    3. Sé natural y empática.
+    INSTRUCCIONES DE VOZ:
+    1. Habla fluido y natural.
+    2. Evita frases robóticas muy cortas.
+    3. Sé cálida, empática y profesional.
     `;
 
     try {
@@ -102,7 +105,7 @@ class StreamManager {
           ],
           stream: true,
           temperature: 0.6,
-          max_tokens: 250
+          max_tokens: 300
         })
       });
 
@@ -127,19 +130,22 @@ class StreamManager {
                 fullResponse += content;
                 sentenceBuffer += content;
 
-                // DETECTOR DE FRASES COMPLETAS
-                // Buscamos puntuación fuerte (. ? !)
                 if (sentenceBuffer.match(/[.?!;]/)) {
-                   // Encontramos el índice del último signo de puntuación
-                   const match = sentenceBuffer.match(/[.?!;]/);
-                   const index = match.index;
-
-                   const completeSentence = sentenceBuffer.substring(0, index + 1);
-                   const remainder = sentenceBuffer.substring(index + 1);
+                   const isLongEnough = sentenceBuffer.length > MIN_CHUNK_LENGTH;
+                   const isQuestion = sentenceBuffer.includes('?');
                    
-                   if (completeSentence.trim().length > 2) {
-                      this.queueAudio(completeSentence.trim());
-                      sentenceBuffer = remainder;
+                   if (isLongEnough || isQuestion) {
+                       const match = sentenceBuffer.match(/[.?!;]/g); 
+                       const lastPunctuationChar = match[match.length - 1];
+                       const lastIndex = sentenceBuffer.lastIndexOf(lastPunctuationChar);
+
+                       const completeChunk = sentenceBuffer.substring(0, lastIndex + 1);
+                       const remainder = sentenceBuffer.substring(lastIndex + 1);
+                       
+                       if (completeChunk.trim().length > 0) {
+                          this.queueAudio(completeChunk.trim());
+                          sentenceBuffer = remainder;
+                       }
                    }
                 }
               }
@@ -148,7 +154,6 @@ class StreamManager {
         }
       }
 
-      // Remanente
       if (sentenceBuffer.trim().length > 0 && !this.isInterrupted) {
         this.queueAudio(sentenceBuffer.trim());
       }
@@ -160,16 +165,15 @@ class StreamManager {
     }
   }
 
-  // --- COLA DE AUDIO INTELIGENTE (CRONOMETRADA) ---
+  // --- COLA DE AUDIO CON FIX DE ARRANQUE ---
   queueAudio(text) {
     if (this.isInterrupted) return;
-    console.log(`📥 Encolando: "${text}"`);
     this.audioQueue.push(text);
     this.processQueue();
   }
 
   async processQueue() {
-    if (this.isProcessingQueue) return; // Si ya está procesando, no hacer nada
+    if (this.isProcessingQueue) return; 
     this.isProcessingQueue = true;
 
     while (this.audioQueue.length > 0) {
@@ -178,21 +182,26 @@ class StreamManager {
         break;
       }
 
+      // 🟢 FIX DE ARRANQUE: SI ES LA PRIMERA VEZ, ESPERAMOS
+      if (this.isFirstInteraction) {
+        console.log(`🔌 Primer mensaje: Esperando ${FIRST_MESSAGE_DELAY_MS}ms para desmuteo...`);
+        await new Promise(resolve => setTimeout(resolve, FIRST_MESSAGE_DELAY_MS));
+        this.isFirstInteraction = false; // Ya no esperamos más en las siguientes
+      }
+
       const text = this.audioQueue.shift();
       
-      // 1. Generar y Enviar Audio
       try {
         await this.generateAndSendAudio(text);
         
-        // 2. CALCULAR DURACIÓN ESTIMADA (La clave anti-superposición)
-        // Estimamos: Caracteres / Velocidad * 1000ms + Buffer pequeño
-        const estimatedDurationMs = Math.max(1000, (text.length / CHARS_PER_SECOND) * 1000);
+        // Calculamos espera normal para sincronizar
+        const durationMs = (text.length / CHARS_PER_SECOND) * 1000;
+        const waitTime = Math.max(500, durationMs - 200); 
         
-        console.log(`⏳ Esperando ${Math.round(estimatedDurationMs)}ms (reproduciendo)...`);
+        console.log(`🔊 Reproduciendo: "${text}" (${Math.round(waitTime)}ms)`);
         
-        // 3. ESPERAR A QUE TERMINE DE SONAR ANTES DE SEGUIR
         await new Promise(resolve => {
-          this.currentWaitTimer = setTimeout(resolve, estimatedDurationMs);
+          this.currentWaitTimer = setTimeout(resolve, waitTime);
         });
 
       } catch (e) {
@@ -201,11 +210,9 @@ class StreamManager {
     }
 
     this.isProcessingQueue = false;
-    console.log('✅ Cola de audio finalizada.');
   }
 
   async generateAndSendAudio(text) {
-    console.log(`🔊 Enviando a Recall: "${text}"`);
     const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream`, {
       method: 'POST',
       headers: {
@@ -215,7 +222,7 @@ class StreamManager {
       body: JSON.stringify({
         text: text,
         model: 'eleven_turbo_v2_5',
-        voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+        voice_settings: { stability: 0.4, similarity_boost: 0.7 },
         optimize_streaming_latency: 4
       })
     });
@@ -283,7 +290,6 @@ wss.on('connection', async (ws, req) => {
         const words = msg.data.data?.words || [];
         
         if (words.length > 0) {
-          // 🛑 INTERRUPCIÓN REAL
           if (streamManager) streamManager.stop();
 
           if (silenceTimer) clearTimeout(silenceTimer);
@@ -312,7 +318,7 @@ wss.on('connection', async (ws, req) => {
 // 4. HTTP
 // ════════════════════════════════════════════════════════════════
 
-app.get('/', (req, res) => res.send('Recall Audio Sync v3.0'));
+app.get('/', (req, res) => res.send('Recall Engine v5.0 (Stable)'));
 const server = app.listen(port, () => console.log(`📡 Puerto ${port}`));
 
 server.on('upgrade', (req, socket, head) => {
