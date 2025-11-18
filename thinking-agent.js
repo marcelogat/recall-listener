@@ -251,10 +251,10 @@ Responde en JSON:
   /**
    * Muestra la evaluación en el log de forma clara
    */
-  displayEvaluation(eval) {
+  displayEvaluation(evaluation) {
     console.log('🧠');
     console.log('🧠 💭 MI EVALUACIÓN:');
-    console.log(`🧠 ${eval.situationAnalysis}`);
+    console.log(`🧠 ${evaluation.situationAnalysis}`);
     console.log('🧠');
     
     // Emoji según energía
@@ -265,7 +265,7 @@ Responde en JSON:
       'dispersa': '💭',
       'tensa': '😰'
     };
-    console.log(`🧠 ${energyEmoji[eval.energyLevel] || '📊'} ENERGÍA: ${eval.energyLevel.toUpperCase()}`);
+    console.log(`🧠 ${energyEmoji[evaluation.energyLevel] || '📊'} ENERGÍA: ${evaluation.energyLevel.toUpperCase()}`);
     
     // Emoji según progreso
     const progressEmoji = {
@@ -274,27 +274,27 @@ Responde en JSON:
       'dando_vueltas': '🔄',
       'productivo': '✅'
     };
-    console.log(`🧠 ${progressEmoji[eval.progressStatus] || '📊'} PROGRESO: ${eval.progressStatus.replace('_', ' ').toUpperCase()}`);
+    console.log(`🧠 ${progressEmoji[evaluation.progressStatus] || '📊'} PROGRESO: ${evaluation.progressStatus.replace('_', ' ').toUpperCase()}`);
     console.log('🧠');
 
-    if (eval.participationIssues) {
+    if (evaluation.participationIssues) {
       console.log(`🧠 👥 PARTICIPACIÓN:`);
-      console.log(`🧠    ${eval.participationIssues}`);
+      console.log(`🧠    ${evaluation.participationIssues}`);
       console.log('🧠');
     }
 
-    if (eval.underlyingTension) {
+    if (evaluation.underlyingTension) {
       console.log(`🧠 ⚠️  TENSIÓN DETECTADA:`);
-      console.log(`🧠    ${eval.underlyingTension}`);
+      console.log(`🧠    ${evaluation.underlyingTension}`);
       console.log('🧠');
     }
 
     console.log(`🧠 💡 LO QUE NECESITA ESTA REUNIÓN AHORA:`);
-    console.log(`🧠    ${eval.whatThisMeetingNeedsNow}`);
+    console.log(`🧠    ${evaluation.whatThisMeetingNeedsNow}`);
     console.log('🧠');
 
     console.log(`🧠 🎯 INSIGHT PRINCIPAL:`);
-    console.log(`🧠    ${eval.mainInsight}`);
+    console.log(`🧠    ${evaluation.mainInsight}`);
     console.log('🧠');
 
     // Nivel de preocupación con colores
@@ -303,7 +303,7 @@ Responde en JSON:
       'medio': '🟡',
       'alto': '🔴'
     };
-    console.log(`🧠 ${concernEmoji[eval.concernLevel] || '🟡'} NIVEL DE PREOCUPACIÓN: ${eval.concernLevel.toUpperCase()}`);
+    console.log(`🧠 ${concernEmoji[evaluation.concernLevel] || '🟡'} NIVEL DE PREOCUPACIÓN: ${evaluation.concernLevel.toUpperCase()}`);
     
     // Estadísticas de participación
     console.log('🧠');
