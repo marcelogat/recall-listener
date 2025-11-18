@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - Sistema con Thinking Brain
+// server.js - Sistema con Thinking Brain (CORREGIDO)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -16,13 +16,18 @@ console.log('🧠 Sistema: GPT-4o-mini inteligente');
 console.log('');
 
 // ════════════════════════════════════════════════════════════════
-// SUPABASE CLIENT
+// SUPABASE CLIENT (Corregido para coincidir con Render)
 // ════════════════════════════════════════════════════════════════
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY; // Usamos la variable que tienes en Render
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ ERROR CRÍTICO: Faltan variables de entorno de Supabase.');
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
 // THINKING BRAIN CLASS
@@ -462,6 +467,7 @@ let agentConfig = null;
 
 async function loadAgentConfig() {
   try {
+    console.log('🔍 Consultando tabla agents en Supabase...');
     const { data, error } = await supabase
       .from('agents')
       .select('*')
@@ -472,7 +478,7 @@ async function loadAgentConfig() {
     
     return data;
   } catch (error) {
-    console.error('❌ Error cargando agente:', error);
+    console.error('❌ Error cargando agente:', error.message);
     return null;
   }
 }
@@ -488,9 +494,11 @@ wss.on('connection', async (ws, request) => {
   if (agentConfig) {
     console.log('✅ Agente cargado:');
     console.log(`   👤 Nombre: ${agentConfig.name}`);
-    console.log(`   🎭 Tipo: ${agentConfig.type}`);
+    console.log(`   🎭 Tipo: ${agentConfig.type || agentConfig.role}`);
     console.log(`   🗣️  Voz: ${agentConfig.voice_name}`);
     console.log(`   🧠 Sistema: THINKING BRAIN`);
+  } else {
+    console.log('⚠️ No se pudo cargar la configuración del agente por defecto.');
   }
   
   ws.on('message', async (data) => {
@@ -519,7 +527,7 @@ wss.on('connection', async (ws, request) => {
       if (message.type === 'transcript.data') {
         
         if (!brain) {
-          console.log('⚠️  Brain no inicializado aún');
+          console.log('⚠️  Brain no inicializado aún (Esperando configuración o Bot ID)');
           return;
         }
         
