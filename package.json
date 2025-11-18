@@ -1,14 +1,23 @@
 {
   "name": "recall-listener",
   "version": "1.0.0",
-  "main": "servidor_con_supabase.js",
+  "description": "Recall.ai WebSocket listener with Thinking Brain",
+  "main": "server.js",
   "scripts": {
-    "start": "node servidor_con_supabase.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "ws": "^8.14.2",
-    "@supabase/supabase-js": "^2.43.4",
-    "axios": "^1.6.0"
+    "node-fetch": "^2.7.0",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
