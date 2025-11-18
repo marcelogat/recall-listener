@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FUSIÓN FINAL: Cerebro + Cuerpo + Diagnóstico
+// server.js - FUSIÓN FINAL (CORREGIDO)
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -18,7 +18,6 @@ console.log('🚀 Servidor WebSocket: INICIANDO SISTEMA COMPLETO');
 // ════════════════════════════════════════════════════════════════
 
 const supabaseUrl = process.env.SUPABASE_URL;
-// Usamos ANON_KEY que es lo que tienes en Render
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
@@ -215,7 +214,7 @@ wss.on('connection', async (ws, req) => {
       if (!recallResp.ok) throw new Error(`Recall Error: ${recallResp.status}`);
       
       console.log('✅ Audio enviado a la sala');
-      brain.addToHistory(agent.name, text); // El cerebro recuerda lo que dijo
+      brain.addToHistory(agent.name, text);
 
     } catch (e) {
       console.error('❌ Error hablando:', e.message);
@@ -252,28 +251,22 @@ wss.on('connection', async (ws, req) => {
     try {
       const msg = JSON.parse(data);
 
-      // LOG DE DIAGNÓSTICO (Para ver si llegan datos)
       if (msg.type !== 'transcript.partial_data') {
-         // Solo logueamos eventos que NO sean parciales para no saturar
          console.log(`📨 Evento: ${msg.type}`);
       }
 
-      // 1. Capturar ID
       if (msg.type === 'bot.data') {
         botId = msg.data.bot?.id || msg.data.bot_id;
         console.log(`🤖 Bot ID vinculado: ${botId}`);
       }
 
-      // 2. Procesar Transcript
       if (msg.type === 'transcript.data') {
         const words = msg.data.data?.words || [];
         const participant = msg.data.data?.participant;
         
-        // LOG DE DATOS REALES
         console.log(`📊 Transcript recibido: ${words.length} palabras`);
 
         if (words.length > 0) {
-          // Mostrar qué palabras llegaron
           console.log(`   🗣️ "${words.map(w => w.text).join(' ')}"`);
 
           if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
@@ -285,7 +278,6 @@ wss.on('connection', async (ws, req) => {
             });
           });
 
-          // Esperar silencio
           silenceTimeoutId = setTimeout(processCompleteUtterance, agent.silence_timeout);
         }
       }
@@ -302,12 +294,13 @@ wss.on('connection', async (ws, req) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// SERVIDOR HTTP
+// SERVIDOR HTTP (AQUÍ ESTABA EL ERROR)
 // ════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => res.send('Recall Brain Active 🧠'));
 const server = app.listen(port, () => console.log(`📡 Servidor escuchando en puerto ${port}`));
 
+// ✅ FIX: Usamos 'req' en ambos lugares
 server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, req));
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
