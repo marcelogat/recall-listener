@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FASE 7: ESTABILIDAD Y CONCURRENCIA (FIX FINAL)
+// server.js - FASE 7: ESTABILIDAD Y LOG VISUAL
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -15,7 +15,7 @@ const port = process.env.PORT || 8080;
 const SILENCE_THRESHOLD_MS = 600; 
 const FIRST_MESSAGE_DELAY_MS = 1500; 
 
-console.log('🚀 Servidor WebSocket: ESTABILIDAD DE CONCURRENCIA OK');
+console.log('🚀 Servidor WebSocket: LOG VISUAL MEJORADO');
 
 // ════════════════════════════════════════════════════════════════
 // 1. SUPABASE
@@ -41,8 +41,7 @@ class StreamManager {
     this.voiceId = voiceConfig.id;
     this.conversationHistory = [];
     
-    // ESTADO CRÍTICO PARA CONCURRENCIA
-    this.isProcessing = false; // 🔴 CANDADO: Si es true, ignoramos nuevos inputs
+    this.isProcessing = false; 
     this.isFirstInteraction = true; 
     this.isInterrupted = false;
   }
@@ -61,6 +60,7 @@ class StreamManager {
 
   stop() {
     this.isInterrupted = true;
+    this.isProcessing = false;
     console.log('🛑 Interrupción.');
   }
 
@@ -69,22 +69,21 @@ class StreamManager {
         console.log('🔒 ERROR DE CONCURRENCIA: Ya estoy pensando. Ignorando input.');
         return; 
     }
-    this.isProcessing = true; // 🔒 Bloqueamos el sistema
+    this.isProcessing = true;
     
-    console.log(`📝 Usuario: "${userText}"`);
+    console.log(`\n🧠 INICIANDO PENSAMIENTO (Input: ${userText.substring(0, 40).trim()}...)...`); // 🟢 LOG INICIO
     this.addToHistory('user', userText);
     this.isInterrupted = false; 
 
     const systemPrompt = `
     Eres ${this.agentName}, ${this.agentRole}.
     INSTRUCCIONES:
-    1. Responde de forma natural y conversacional.
+    1. Responde de forma natural y conversacional, y siempre devuelve una pregunta o un gancho.
     2. Mantente conciso.
     3. Finaliza siempre con una pregunta o un gancho para mantener el flujo.
     `;
 
     try {
-      // 1. OBTENER TEXTO COMPLETO DE GPT
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -107,9 +106,10 @@ class StreamManager {
       if (this.isInterrupted) return; 
 
       const fullText = data.choices[0].message.content;
-      console.log(`🧠 Respuesta GPT: "${fullText}"`);
+      
+      console.log(`✅ DECISIÓN: SPEAK`); // 🟢 LOG DECISIÓN
+      console.log(`💬 TEXTO COMPLETO: "${fullText}"`); // 🟢 LOG TEXTO
 
-      // 2. GENERAR UN SOLO AUDIO
       await this.generateAndSendAudio(fullText);
 
       if (!this.isInterrupted) {
@@ -118,8 +118,10 @@ class StreamManager {
 
     } catch (error) {
       console.error('❌ Error Proceso:', error.message);
+      // Asumimos WAIT si falla
+      console.log(`⏸️ DECISIÓN: WAIT (Fallo en LLM)`); // 🟢 LOG FALLO/WAIT
     } finally {
-      this.isProcessing = false; // 🔓 Liberamos el candado al finalizar
+      this.isProcessing = false;
     }
   }
 
@@ -219,13 +221,11 @@ wss.on('connection', async (ws, req) => {
         const words = msg.data.data?.words || [];
         
         if (words.length > 0) {
-          // 🛑 SI EL USUARIO HABLA, CORTAMOS EL AUDIO ANTERIOR Y LIMPIAMOS TIMER
           if (streamManager) streamManager.stop();
           
           if (silenceTimer) clearTimeout(silenceTimer);
           words.forEach(w => currentUtterance.push(w.text));
 
-          // Esperamos silencio para confirmar fin de frase
           silenceTimer = setTimeout(() => {
             if (currentUtterance.length > 0 && streamManager) {
               const fullText = currentUtterance.join(' ');
