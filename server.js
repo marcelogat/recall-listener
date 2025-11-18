@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// server.js - FUSIÓN: Mecánica Robusta + Cerebro Pensante
+// server.js - FUSIÓN FINAL: Cerebro + Cuerpo + Diagnóstico
 // ════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -11,36 +11,37 @@ const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 8080;
 
-console.log('🚀 Servidor WebSocket: FUSIÓN (Body V1 + Brain V2)');
+console.log('🚀 Servidor WebSocket: INICIANDO SISTEMA COMPLETO');
 
 // ════════════════════════════════════════════════════════════════
-// 1. CONFIGURACIÓN SUPABASE (Corregida)
+// 1. CONFIGURACIÓN SUPABASE
 // ════════════════════════════════════════════════════════════════
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY; // Clave correcta de Render
+// Usamos ANON_KEY que es lo que tienes en Render
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ ERROR: Faltan variables SUPABASE_URL o SUPABASE_ANON_KEY');
+  console.error('❌ ERROR CRÍTICO: Faltan variables SUPABASE_URL o SUPABASE_ANON_KEY');
   process.exit(1);
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ════════════════════════════════════════════════════════════════
-// 2. CLASE THINKING BRAIN (El Cerebro)
+// 2. CLASE CEREBRO (THINKING BRAIN)
 // ════════════════════════════════════════════════════════════════
 
 class ThinkingBrain {
   constructor(agentConfig) {
     this.agentName = agentConfig.name;
     this.agentRole = agentConfig.role;
-    this.conversationHistory = []; // Historial corto para contexto
+    this.conversationHistory = []; 
   }
 
   addToHistory(speaker, text) {
     this.conversationHistory.push({ speaker, text, time: Date.now() });
-    // Mantenemos solo los últimos 10 mensajes para no saturar el prompt
+    // Mantenemos solo los últimos 10 mensajes para contexto
     if (this.conversationHistory.length > 10) {
       this.conversationHistory.shift();
     }
@@ -59,21 +60,23 @@ class ThinkingBrain {
     
     const prompt = `
 Eres ${this.agentName}, un ${this.agentRole}.
-Tu personalidad es natural, argentina, cálida.
+Tu personalidad es natural, argentina y cálida.
 
-HISTORIAL RECIENTE:
+CONTEXTO RECIENTE:
 ${context}
 
-INSTRUCCIÓN:
-Analiza el último mensaje. Decide si debes responder.
-- RESPONDE SI: Te preguntan algo, te mencionan, o es un silencio donde tu aporte suma valor crítico.
-- ESPERA SI: El usuario está pensando, completando una idea, o hablando con otro humano.
+TU TAREA:
+Analiza el último mensaje del usuario.
+1. Si es una pregunta para ti o te saludan -> SPEAK.
+2. Si es un comentario donde tu opinión experta suma valor -> SPEAK.
+3. Si el usuario está dudando o cortó la frase -> WAIT.
+4. Si están hablando entre ellos y no te incumbe -> WAIT.
 
-FORMATO DE RESPUESTA (JSON puro):
+Responde SIEMPRE en formato JSON:
 {
   "decision": "SPEAK" o "WAIT",
-  "reason": "Breve motivo",
-  "message": "Tu respuesta (solo si decision es SPEAK)"
+  "reason": "motivo breve",
+  "message": "tu respuesta (solo si decision es SPEAK)"
 }
 `;
 
@@ -85,37 +88,41 @@ FORMATO DE RESPUESTA (JSON puro):
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini', // Rápido y eficiente
+          model: 'gpt-4o-mini', 
           messages: [
-            { role: 'system', content: 'Eres un cerebro IA que decide cuándo hablar en una reunión.' },
+            { role: 'system', content: 'Eres una IA participando en una videollamada.' },
             { role: 'user', content: prompt }
           ],
           temperature: 0.6,
-          max_tokens: 150,
+          max_tokens: 200,
           response_format: { type: "json_object" }
         })
       });
 
       const data = await response.json();
-      const content = JSON.parse(data.choices[0].message.content);
+      
+      if (!data.choices || !data.choices[0]) {
+        throw new Error('Respuesta vacía de OpenAI');
+      }
 
+      const content = JSON.parse(data.choices[0].message.content);
       console.log(`🧠 Decisión: ${content.decision} (${content.reason})`);
-      return content; // Retorna { decision, reason, message }
+      return content;
 
     } catch (error) {
-      console.error('❌ Error en el cerebro:', error);
-      return { decision: 'WAIT' }; // Ante la duda, silencio
+      console.error('❌ Error en el cerebro:', error.message);
+      return { decision: 'WAIT', reason: 'Error interno' };
     }
   }
 }
 
 // ════════════════════════════════════════════════════════════════
-// 3. LÓGICA DEL SERVIDOR (El Cuerpo Robusto del V1)
+// 3. SERVIDOR Y LOGICA DE CONEXIÓN
 // ════════════════════════════════════════════════════════════════
 
 const wss = new WebSocket.Server({ noServer: true });
 
-// Función de carga de datos (Versión corregida)
+// Función para cargar agente de la BD
 async function loadActiveAgent() {
   try {
     const { data: agent, error } = await supabase
@@ -124,16 +131,17 @@ async function loadActiveAgent() {
       .eq('is_default', true)
       .single();
 
-    if (error || !agent) throw new Error('No se encontró agente');
+    if (error || !agent) throw new Error('No se encontró agente default');
 
+    // Buscar configuración de voz activa
     const voiceConfig = agent.agent_voice_config?.find(v => v.is_active) || agent.agent_voice_config?.[0];
 
     return {
       agent: {
-        name: agent.name,
+        name: agent.name || 'Agente',
         role: agent.agent_type || 'Asistente',
-        language: agent.language,
-        silence_timeout: agent.silence_timeout_ms || 1000
+        language: agent.language || 'es-AR',
+        silence_timeout: agent.silence_timeout_ms || 1500
       },
       voice: {
         id: voiceConfig?.voice_id || 'eleven_turbo_v2_5',
@@ -141,7 +149,7 @@ async function loadActiveAgent() {
       }
     };
   } catch (e) {
-    console.error('❌ Error DB:', e.message);
+    console.error('❌ Error cargando agente:', e.message);
     return null;
   }
 }
@@ -149,32 +157,34 @@ async function loadActiveAgent() {
 wss.on('connection', async (ws, req) => {
   console.log('✅ Conexión establecida');
   
-  // 1. Cargar Configuración
   const config = await loadActiveAgent();
   if (!config) {
-    console.log('❌ Cerrando por falta de configuración');
+    console.log('⚠️ Cerrando conexión: No se pudo cargar configuración.');
     ws.close();
     return;
   }
 
   const { agent, voice } = config;
-  const brain = new ThinkingBrain(agent); // Instanciar el cerebro
+  const brain = new ThinkingBrain(agent);
   
-  console.log(`🤖 Agente listo: ${agent.name} (${agent.role})`);
+  console.log(`🤖 Agente Activo: ${agent.name} (${agent.role})`);
+  console.log(`⏱️  Timeout de silencio: ${agent.silence_timeout}ms`);
 
-  // Variables de Estado (Mecánica del V1)
+  // Variables de estado
   let currentUtterance = [];
   let silenceTimeoutId = null;
   let isProcessing = false;
   let botId = null;
 
-  // --- FUNCIÓN DE HABLAR (Output) ---
+  // --- Output Audio ---
   async function speak(text) {
-    if (!botId) return;
+    if (!botId) {
+      console.error('⚠️ No puedo hablar: Falta Bot ID');
+      return;
+    }
     try {
-      console.log(`🗣️  Generando audio: "${text}"`);
+      console.log(`🗣️  Generando audio...`);
       
-      // ElevenLabs
       const audioResp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice.id}`, {
         method: 'POST',
         headers: {
@@ -183,15 +193,17 @@ wss.on('connection', async (ws, req) => {
         },
         body: JSON.stringify({
           text: text,
-          model_id: voice.model
+          model_id: voice.model,
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 }
         })
       });
       
+      if (!audioResp.ok) throw new Error(`ElevenLabs Error: ${audioResp.status}`);
+
       const arrayBuffer = await audioResp.arrayBuffer();
       const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
-      // Recall.ai
-      await fetch(`https://us-west-2.recall.ai/api/v1/bot/${botId}/output_audio/`, {
+      const recallResp = await fetch(`https://us-west-2.recall.ai/api/v1/bot/${botId}/output_audio/`, {
         method: 'POST',
         headers: {
           'Authorization': `Token ${process.env.RECALL_API_KEY}`,
@@ -199,64 +211,73 @@ wss.on('connection', async (ws, req) => {
         },
         body: JSON.stringify({ kind: 'mp3', b64_data: base64Audio })
       });
+
+      if (!recallResp.ok) throw new Error(`Recall Error: ${recallResp.status}`);
       
-      console.log('✅ Audio enviado a la reunión');
-      // Agregamos nuestra propia respuesta al historial del cerebro
-      brain.addToHistory(agent.name, text);
+      console.log('✅ Audio enviado a la sala');
+      brain.addToHistory(agent.name, text); // El cerebro recuerda lo que dijo
 
     } catch (e) {
-      console.error('❌ Error generando/enviando audio:', e.message);
+      console.error('❌ Error hablando:', e.message);
     }
   }
 
-  // --- PROCESAR FRASE COMPLETA (El puente entre V1 y Brain) ---
+  // --- Procesar Frase Completa ---
   async function processCompleteUtterance() {
     if (currentUtterance.length === 0 || isProcessing) return;
-
     isProcessing = true;
     
-    // 1. Reconstruir la frase dicha por el humano
     const fullText = currentUtterance.map(w => w.text).join(' ');
-    const speaker = currentUtterance[0].speakerName || 'Humano';
+    const speaker = currentUtterance[0].speakerName || 'Usuario';
     
-    console.log(`📝 Escuchado [${speaker}]: "${fullText}"`);
+    console.log(`📝 FRASE COMPLETA [${speaker}]: "${fullText}"`);
     
-    // 2. Alimentar al cerebro
     brain.addToHistory(speaker, fullText);
     
-    // 3. PREGUNTAR AL CEREBRO (Aquí está la magia)
-    // Ya no usamos Regex simple, usamos GPT para evaluar si responder
     const decision = await brain.decideAndRespond(fullText);
     
     if (decision.decision === 'SPEAK') {
+      console.log(`🎯 RESPODIENDO: "${decision.message}"`);
       await speak(decision.message);
     } else {
-      console.log('⏸️  Decisión: Esperar');
+      console.log('⏸️  Silencio estratégico');
     }
 
-    currentUtterance = []; // Limpiar buffer
+    currentUtterance = [];
     isProcessing = false;
   }
 
+  // --- Manejo de Mensajes ---
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
 
-      // Capturar ID del Bot
-      if (msg.type === 'bot.data') {
-        botId = msg.data.bot?.id || msg.data.bot_id;
+      // LOG DE DIAGNÓSTICO (Para ver si llegan datos)
+      if (msg.type !== 'transcript.partial_data') {
+         // Solo logueamos eventos que NO sean parciales para no saturar
+         console.log(`📨 Evento: ${msg.type}`);
       }
 
-      // Procesar Transcript (Mecánica V1)
+      // 1. Capturar ID
+      if (msg.type === 'bot.data') {
+        botId = msg.data.bot?.id || msg.data.bot_id;
+        console.log(`🤖 Bot ID vinculado: ${botId}`);
+      }
+
+      // 2. Procesar Transcript
       if (msg.type === 'transcript.data') {
         const words = msg.data.data?.words || [];
         const participant = msg.data.data?.participant;
         
+        // LOG DE DATOS REALES
+        console.log(`📊 Transcript recibido: ${words.length} palabras`);
+
         if (words.length > 0) {
-          // Resetear timeout de silencio
+          // Mostrar qué palabras llegaron
+          console.log(`   🗣️ "${words.map(w => w.text).join(' ')}"`);
+
           if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
           
-          // Acumular palabras
           words.forEach(w => {
             currentUtterance.push({
               text: w.text,
@@ -264,26 +285,29 @@ wss.on('connection', async (ws, req) => {
             });
           });
 
-          // Configurar nuevo timeout (Esperar a que termine la frase)
-          // Usamos el timeout configurado en la BD o 1 segundo por defecto
+          // Esperar silencio
           silenceTimeoutId = setTimeout(processCompleteUtterance, agent.silence_timeout);
         }
       }
+
     } catch (e) {
-      console.error('Error socket:', e);
+      console.error('❌ Error socket:', e.message);
     }
   });
 
   ws.on('close', () => {
-    console.log('❌ Desconectado');
+    console.log('❌ WebSocket cerrado');
     if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
   });
 });
 
-// Servidor HTTP Básico
+// ════════════════════════════════════════════════════════════════
+// SERVIDOR HTTP
+// ════════════════════════════════════════════════════════════════
+
 app.get('/', (req, res) => res.send('Recall Brain Active 🧠'));
-const server = app.listen(port, () => console.log(`📡 Escuchando en puerto ${port}`));
+const server = app.listen(port, () => console.log(`📡 Servidor escuchando en puerto ${port}`));
 
 server.on('upgrade', (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, req));
 });
