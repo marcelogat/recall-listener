@@ -4,10 +4,10 @@ class ThinkingAgent {
   constructor(meetingId, agentConfig) {
     this.meetingId = meetingId;
     this.agent = agentConfig.agent;
-    this.language = agentConfig.agent.language || 'es'; // Detectar idioma
+    this.language = agentConfig.agent.language || 'es'; 
     
     // 🧠 MEMORIA DUAL
-    this.conversationBuffer = []; // Memoria de trabajo (últimos 30 msgs)
+    this.conversationBuffer = []; // Memoria de trabajo (últimos 20-30 msgs)
     this.fullTranscript = [];     // Memoria a largo plazo (toda la reunión)
     
     this.thinkingHistory = [];
@@ -22,7 +22,7 @@ class ThinkingAgent {
   }
 
   getKeywordsByLanguage(lang) {
-    if (lang.startsWith('en')) {
+    if (lang && lang.startsWith('en')) {
       return {
         confusion: ['don\'t understand', 'unclear', 'confused', 'not sure', 'what do you mean'],
         objection: ['but', 'however', 'disagree', 'issue is', 'concern', 'not sure about'],
@@ -39,11 +39,16 @@ class ThinkingAgent {
     };
   }
 
+  /**
+   * Entry point principal (Wrapper síncrono para no bloquear audio)
+   */
   async processUtterance(fullText, metadata) {
-    // No uses await aquí para no bloquear el hilo principal de audio
     this._processAsync(fullText, metadata).catch(err => console.error('❌ Error background thinking:', err));
   }
 
+  /**
+   * Lógica asíncrona de procesamiento
+   */
   async _processAsync(fullText, metadata) {
     const { speakerName, speakerId, isAgentSpeaking } = metadata;
     const utteranceObj = {
@@ -55,29 +60,72 @@ class ThinkingAgent {
 
     // 1. Guardar en ambas memorias
     this.conversationBuffer.push(utteranceObj);
-    this.fullTranscript.push(utteranceObj); // <-- ESTO SOLUCIONA EL BUG DE AMNESIA
+    this.fullTranscript.push(utteranceObj);
 
+    // 2. Actualizar estadísticas (Aquí estaba el error antes)
     this.updateStats(speakerId, speakerName, fullText);
+    
+    // 3. Pensamiento rápido (Keywords)
     this.quickThink(fullText, speakerName, isAgentSpeaking);
 
     // Mantener buffer corto para el contexto inmediato de GPT
-    if (this.conversationBuffer.length > 20) { // Bajado a 20 para ahorrar tokens
+    if (this.conversationBuffer.length > 20) {
       this.conversationBuffer.shift();
     }
 
+    // 4. Pensamiento profundo (LLM) si corresponde
     if (this.shouldThinkNow()) {
       await this.deepThink();
     }
   }
 
-  // ... updateStats se mantiene igual ...
+  /**
+   * Actualiza estadísticas de participación
+   */
+  updateStats(speakerId, speakerName, text) {
+    if (!this.speakerStats.has(speakerId)) {
+      this.speakerStats.set(speakerId, {
+        name: speakerName,
+        interventions: 0,
+        totalWords: 0,
+        questions: 0,
+        lastSpoke: 0
+      });
+    }
+
+    const stats = this.speakerStats.get(speakerId);
+    stats.interventions++;
+    stats.totalWords += text.split(' ').length;
+    stats.lastSpoke = Date.now();
+    
+    // Detección básica de preguntas para estadísticas
+    if (text.includes('?') || this.hasQuestionPattern(text)) {
+      stats.questions++;
+    }
+  }
+
+  /**
+   * Detecta patrones de pregunta (Helper para updateStats)
+   */
+  hasQuestionPattern(text) {
+    const questionWords = [
+      'qué', 'quién', 'cómo', 'cuándo', 'dónde', 'por qué', 'cuál',
+      'que', 'quien', 'como', 'cuando', 'donde', 'porque', 'cual',
+      'podés', 'podes', 'podría', 'podrias', 'what', 'who', 'how', 'when'
+    ];
+    
+    const lowerText = text.toLowerCase();
+    return questionWords.some(word => {
+      const regex = new RegExp(`\\b${word}\\b`);
+      return regex.test(lowerText);
+    });
+  }
 
   quickThink(text, speaker, isAgent) {
-    if (isAgent) return; // No analizarse a sí mismo
+    if (isAgent) return; 
     
     const lowerText = text.toLowerCase();
     
-    // Usar keywords dinámicas
     if (this.keywords.confusion.some(w => lowerText.includes(w))) {
       console.log(`🧠 🤔 [CONFUSIÓN DETECTADA] ${speaker}`);
     }
@@ -85,19 +133,21 @@ class ThinkingAgent {
       console.log(`🧠 ⚠️  [OBJECIÓN DETECTADA] ${speaker}`);
     }
     if (this.keywords.enthusiasm.some(w => lowerText.includes(w))) {
-      console.log(`🧠 ✨ [ENTUSIASMO DETECTADA] ${speaker}`);
+      console.log(`🧠 ✨ [ENTUSIASMO DETECTADO] ${speaker}`);
     }
   }
 
   shouldThinkNow() {
     const now = Date.now();
-    // Aumentado a 45s para ahorrar dinero
+    
+    // No pensar tan seguido (ahorro de costos)
     if (now - this.lastThinkingTime < 45000) return false; 
     
-    // Solo pensar si alguien habló recientemente (no pensar en silencio)
+    // Solo pensar si alguien habló recientemente
     const lastMsgTime = this.conversationBuffer[this.conversationBuffer.length - 1]?.timestamp || 0;
     if (now - lastMsgTime > 10000) return false; 
 
+    // Solo pensar si hubo al menos 3 intervenciones nuevas
     return this.conversationBuffer.filter(m => m.timestamp > this.lastThinkingTime).length >= 3;
   }
 
@@ -110,13 +160,12 @@ class ThinkingAgent {
         .map(msg => `${msg.speaker}: ${msg.text}`)
         .join('\n');
 
-      // Prompt simplificado para gpt-4o-mini
       const evaluationPrompt = `Analiza el estado actual de esta reunión.
 CONTEXTO: ${elapsed} mins transcurridos.
 CHAT RECIENTE:
 ${conversationText}
 
-JSON Output:
+Responde en JSON:
 {
   "situation": "breve resumen de lo que pasa ahora",
   "energy": "alta/media/baja/tensa",
@@ -124,7 +173,6 @@ JSON Output:
   "action_needed": "que debería hacer el bot si interviene ahora"
 }`;
 
-      // CAMBIO CLAVE: Usar gpt-4o-mini para el pensamiento recurrente (10x más barato)
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -132,7 +180,7 @@ JSON Output:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini', // <--- AHORRO DE COSTOS
+          model: 'gpt-4o-mini',
           messages: [
             { role: 'system', content: 'Eres un analista de reuniones. Responde JSON.' },
             { role: 'user', content: evaluationPrompt }
@@ -153,20 +201,23 @@ JSON Output:
     }
   }
 
+  displayEvaluation(evaluation) {
+    console.log('🧠 💭 PENSAMIENTO AUTOMÁTICO:');
+    console.log(`🧠 Sit: ${evaluation.situation}`);
+    console.log(`🧠 Insight: ${evaluation.insight}`);
+  }
+
   async getFinalThoughts() {
     try {
       console.log('🧠 🏁 Generando reporte final...');
       
-      // Usar fullTranscript (ahora sí tenemos todo)
-      // IMPORTANTE: Si la reunión es muy larga, gpt-4o tiene límite de 128k tokens.
-      // Para MVP está bien, para prod deberías truncar si > 2 horas.
       const allConversation = this.fullTranscript
         .map(msg => `${msg.speaker}: ${msg.text}`)
         .join('\n');
 
       const finalPrompt = `Analiza esta reunión completa y genera un reporte ejecutivo.
       
-      HISTORIAL DE PENSAMIENTOS DURANTE LA REUNION:
+      HISTORIAL DE INSIGHTS:
       ${this.thinkingHistory.map(t => `- ${t.insight}`).join('\n')}
       
       TRANSCRIPCION COMPLETA:
@@ -174,7 +225,6 @@ JSON Output:
       
       Genera un JSON detallado con feedback, puntos clave y rating.`;
 
-      // Aquí SÍ usamos GPT-4o para el reporte final de calidad
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -182,13 +232,12 @@ JSON Output:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o', // <--- CALIDAD MÁXIMA PARA EL REPORTE
+          model: 'gpt-4o',
           messages: [{ role: 'user', content: finalPrompt }],
           response_format: { type: "json_object" }
         })
       });
 
-      // ... resto del código de parseo ...
       const data = await response.json();
       return JSON.parse(data.choices[0].message.content);
 
@@ -196,8 +245,6 @@ JSON Output:
       console.error(e);
     }
   }
-
-  // ... resto de métodos (displayEvaluation, etc) ...
 }
 
 module.exports = { ThinkingAgent };
