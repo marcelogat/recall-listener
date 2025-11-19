@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 const { ThinkingAgent } = require('./thinking-agent');
 
+// --- CONFIGURACIÓN ---
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -13,132 +14,73 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log('🚀 Servidor WebSocket iniciado en el puerto 8080');
+console.log('🚀 Servidor WebSocket iniciado en puerto 8080');
 
+// --- FUNCIONES DE CARGA ---
 async function loadActiveAgent(agentName = null) {
-  try {
-    console.log('📥 Cargando configuración del agente desde la base de datos...');
-
-    let query = supabase
-      .from('agents')
-      .select(`
-        *,
-        agent_voice_config (*)
-      `)
-      .eq('is_active', true);
-
-    if (agentName) {
-      query = query.eq('name', agentName.toLowerCase());
-      console.log(`   🔍 Buscando agente: ${agentName}`);
-    } else {
-      query = query.eq('is_default', true);
-      console.log('   🔍 Buscando agente por defecto');
-    }
-
-    const { data: agent, error } = await query.single();
-
-    if (error || !agent) {
-      console.error('❌ Error cargando agente:', error);
-      throw new Error(`No se pudo cargar el agente${agentName ? ` "${agentName}"` : ' por defecto'}`);
-    }
-
-    if (!agent.agent_voice_config || agent.agent_voice_config.length === 0) {
-      throw new Error(`El agente ${agent.name} no tiene configuración de voz`);
-    }
-
-    const voiceConfig = agent.agent_voice_config.find(v => v.is_active);
-
-    if (!voiceConfig) {
-      throw new Error(`El agente ${agent.name} no tiene una voz activa`);
-    }
-
-    console.log(`✅ Agente cargado exitosamente:`);
-    console.log(`   👤 Nombre: ${agent.display_name}`);
-    console.log(`   🎭 Tipo: ${agent.agent_type}`);
-    console.log(`   🗣️  Voz: ${voiceConfig.voice_name}`);
-    console.log(`   🌍 Idioma: ${agent.language}`);
-    console.log(`   📍 Ubicación: ${agent.city}, ${agent.country}`);
-    console.log(`   🤖 Modelo LLM: ${agent.llm_model}`);
-    console.log(`   ⏱️  Timeouts: silence=${agent.silence_timeout_ms}ms, conversation=${agent.conversation_timeout_ms}ms`);
-
-    return {
-      agent,
-      voiceConfig
-    };
-
-  } catch (error) {
-    console.error('❌ Error en loadActiveAgent:', error.message);
-    throw error;
+  // (Misma lógica que tenías antes, funciona bien)
+  let query = supabase.from('agents').select(`*, agent_voice_config (*)`).eq('is_active', true);
+  
+  if (agentName) {
+    query = query.eq('name', agentName.toLowerCase());
+  } else {
+    query = query.eq('is_default', true);
   }
+
+  const { data: agent, error } = await query.single();
+  if (error || !agent) throw new Error(`Error cargando agente: ${error?.message}`);
+
+  const voiceConfig = agent.agent_voice_config.find(v => v.is_active);
+  if (!voiceConfig) throw new Error(`Agente sin configuración de voz activa`);
+
+  console.log(`✅ Agente cargado: ${agent.display_name} (${agent.llm_model})`);
+  return { agent, voiceConfig };
 }
 
+// --- WEBSOCKET HANDLER ---
 wss.on('connection', async function connection(ws, req) {
   const clientIp = req.socket.remoteAddress;
-  console.log(`\n✅ Nueva conexión WebSocket desde: ${clientIp}`);
+  console.log(`\n🔌 Nueva conexión desde: ${clientIp}`);
 
   let agentConfig;
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const agentName = url.searchParams.get('agent');
-    
     agentConfig = await loadActiveAgent(agentName);
   } catch (error) {
-    console.error('❌ No se pudo cargar el agente, cerrando conexión');
-    ws.close(1011, 'No se pudo cargar configuración del agente');
+    console.error('❌ Error fatal:', error.message);
+    ws.close(1011, error.message);
     return;
   }
 
   const { agent, voiceConfig } = agentConfig;
-
-  // 🧠 INICIALIZAR AGENTE PENSANTE
-  const meetingId = `meeting_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const meetingId = `meeting_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+  
+  // 🧠 INICIALIZAR CEREBRO
+  // Usamos la versión mejorada de ThinkingAgent (asegúrate de actualizar ese archivo también)
   const thinkingAgent = new ThinkingAgent(meetingId, agentConfig);
 
-  const AGENT_PROFILE = agent.profile_text;
-  const SILENCE_TIMEOUT = agent.silence_timeout_ms;
-  const CONVERSATION_TIMEOUT = agent.conversation_timeout_ms;
-  const AUDIO_COOLDOWN = agent.audio_cooldown_ms;
-  const FIRST_MESSAGE_SILENCE = agent.first_message_silence_seconds;
-  const CONTEXT_HISTORY_LENGTH = agent.llm_context_history_length;
-  
-  const VOICE_ID = voiceConfig.voice_id;
-  const VOICE_MODEL = voiceConfig.voice_model;
-  const VOICE_SETTINGS = voiceConfig.voice_settings;
+  // CONFIGURACIÓN DE TIEMPOS
+  const SILENCE_TIMEOUT = agent.silence_timeout_ms || 1500; // Tiempo de espera tras dejar de hablar
+  const MAX_CONTEXT_HISTORY = 15; 
 
+  // ESTADO DE LA CONVERSACIÓN
+  let conversationHistory = [];
   let currentUtterance = [];
   let silenceTimeoutId = null;
-  let conversationTimeoutId = null;
-  let lastSpeaker = null;
+  let lastWordTime = Date.now();
   let botId = null;
-  let conversationHistory = [];
   
-  let uniqueSpeakers = new Set();
+  // ESTADO DE INTERACCIÓN
   let isAgentSpeaking = false;
-  let isAgentActive = false;
-  let lastAgentResponseTime = 0;
-  let isProcessing = false;
-  let lastWordTime = 0;
-  let isFirstMessage = true;
-  let conversationTimeoutStartTime = 0;
-  let userIsCurrentlySpeaking = false;
+  let isProcessingResponse = false;
+  let shouldCancelResponse = false; // Flag para interrupciones
 
-  console.log(`\n🎙️ ${agent.display_name} está listo y escuchando...\n`);
+  // --- FUNCIONES CORE ---
 
-  async function generateElevenLabsAudio(text, addInitialSilence = false) {
+  async function generateElevenLabsAudio(text) {
     try {
-      console.log(`🎙️ Generando audio con ${voiceConfig.voice_name}...`);
-      
-      let finalText = text;
-      if (addInitialSilence) {
-        finalText = `<break time="${FIRST_MESSAGE_SILENCE}s"/> ${text}`;
-        console.log(`🔇 Agregando ${FIRST_MESSAGE_SILENCE}s de silencio inicial (primer mensaje)`);
-      }
-      
-      console.log(`📝 Texto: "${finalText}"`);
-
-      const startTime = Date.now();
-
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceConfig.voice_id}`, {
         method: 'POST',
         headers: {
           'Accept': 'audio/mpeg',
@@ -146,661 +88,232 @@ wss.on('connection', async function connection(ws, req) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: finalText,
-          model_id: VOICE_MODEL,
-          voice_settings: VOICE_SETTINGS
+          text: text,
+          model_id: voiceConfig.voice_model,
+          voice_settings: voiceConfig.voice_settings
         })
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`ElevenLabs error: ${response.status} - ${error}`);
-      }
-
-      const audioBuffer = await response.arrayBuffer();
-      const mp3Base64 = Buffer.from(audioBuffer).toString('base64');
-
-      const duration = Date.now() - startTime;
-      console.log(`✅ Audio generado en ${duration}ms: ${mp3Base64.length} caracteres`);
-      
-      return mp3Base64;
-
-    } catch (error) {
-      console.error('❌ Error generando audio con ElevenLabs:', error.message);
-      throw error;
+      if (!response.ok) throw new Error(`ElevenLabs: ${response.statusText}`);
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer).toString('base64');
+    } catch (e) {
+      console.error('❌ Error TTS:', e.message);
+      return null;
     }
   }
 
-  async function sendAudioToBot(audioBase64) {
-    if (!botId) {
-      console.error('❌ No hay bot_id disponible para enviar audio');
-      return;
-    }
-
+  async function sendAudioToRecall(audioBase64) {
+    if (!botId) return;
     try {
-      console.log('🔊 Enviando audio al bot de Recall.ai...');
-      const startTime = Date.now();
-      
-      const response = await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
+      await fetch(`https://${RECALL_REGION}.recall.ai/api/v1/bot/${botId}/output_audio/`, {
         method: 'POST',
         headers: {
           'Authorization': `Token ${RECALL_API_KEY}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
+          'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          kind: 'mp3',
-          b64_data: audioBase64
-        })
+        body: JSON.stringify({ kind: 'mp3', b64_data: audioBase64 })
       });
-
-      const duration = Date.now() - startTime;
-
-      if (response.ok) {
-        console.log(`✅ Audio enviado al bot en ${duration}ms`);
-      } else {
-        const error = await response.text();
-        console.error('❌ Error enviando audio al bot:', response.status, error);
-      }
-    } catch (error) {
-      console.error('❌ Error en sendAudioToBot:', error.message);
+    } catch (e) {
+      console.error('❌ Error enviando audio a Recall:', e.message);
     }
   }
 
-  async function getGPT4Response(userMessage, speakerName) {
+  /**
+   * ⚡ CORE LOGIC: Unifica decisión y generación para latencia mínima.
+   * El Prompt instruye al modelo a devolver "[SILENCE]" si no debe hablar.
+   */
+  async function processAndRespond(userText, speakerName) {
+    if (isProcessingResponse) return;
+    
+    isProcessingResponse = true;
+    shouldCancelResponse = false; // Nuevo ciclo
+
     try {
-      console.log(`🤖 Obteniendo respuesta de ${agent.llm_model}...`);
-      const startTime = Date.now();
+      // 1. Disparar "Pensamiento" en background (Fire & Forget)
+      // No usamos 'await' para no bloquear la voz
+      thinkingAgent.processUtterance(userText, {
+        speakerName,
+        speakerId: speakerName, // Idealmente usar ID real si existe
+        isAgentSpeaking: false
+      }).catch(err => console.error('Error en thinkingAgent:', err));
 
-      const messageWithSpeaker = `[${speakerName} dice]: ${userMessage}`;
+      console.log(`\n📨 Procesando: "${userText}"`);
 
-      conversationHistory.push({
-        role: 'user',
-        content: messageWithSpeaker
-      });
+      // 2. Construir historial para contexto
+      const recentHistory = conversationHistory.map(m => 
+        `${m.role === 'user' ? `(${m.speaker})` : '(Assistant)'}: ${m.content}`
+      ).join('\n');
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const systemPrompt = `${agent.profile_text}
+      
+      INSTRUCCIONES DE COMPORTAMIENTO EN TIEMPO REAL:
+      1. Eres un participante más en la reunión.
+      2. Si el usuario NO te está hablando a ti, o están hablando entre ellos, o solo dijo algo corto como "ok" o "gracias", TU RESPUESTA DEBE SER: [SILENCE]
+      3. Si debes responder, sé conciso, natural y directo.
+      4. No saludes todo el tiempo.
+      
+      IMPORTANTE: Responde SOLAMENTE con el texto que vas a decir, o "[SILENCE]" si decides callar.`;
+
+      // 3. Llamada optimizada a OpenAI
+      const completion = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${OPENAI_API_KEY}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: agent.llm_model,
+          model: agent.llm_model || 'gpt-4o', // Usar modelo rápido
           messages: [
-            {
-              role: 'system',
-              content: AGENT_PROFILE
-            },
-            ...conversationHistory
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `CONTEXTO PREVIO:\n${recentHistory}\n\nAHORA:\n[${speakerName}]: ${userText}` }
           ],
-          temperature: agent.llm_temperature,
-          max_tokens: agent.llm_max_tokens,
-          top_p: 1,
-          frequency_penalty: 0,
-          presence_penalty: 0
+          temperature: 0.6,
+          max_tokens: 150 // Limitar longitud para velocidad
         })
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`OpenAI error: ${response.status} - ${error}`);
-      }
+      const data = await completion.json();
+      let aiResponse = data.choices?.[0]?.message?.content || '[SILENCE]';
 
-      const data = await response.json();
-      const assistantMessage = data.choices[0].message.content;
-
-      conversationHistory.push({
-        role: 'assistant',
-        content: assistantMessage
-      });
-
-      if (conversationHistory.length > CONTEXT_HISTORY_LENGTH) {
-        conversationHistory = conversationHistory.slice(-CONTEXT_HISTORY_LENGTH);
-      }
-
-      const duration = Date.now() - startTime;
-      console.log(`🎯 Respuesta de ${agent.llm_model} en ${duration}ms:`, assistantMessage);
-      
-      return assistantMessage;
-
-    } catch (error) {
-      console.error('❌ Error obteniendo respuesta de GPT:', error.message);
-      throw error;
-    }
-  }
-
-  function activateConversation() {
-    isAgentActive = true;
-    console.log('🟢 MODO ACTIVO: Agente en conversación');
-    
-    if (conversationTimeoutId) {
-      clearTimeout(conversationTimeoutId);
-      console.log('   ⏱️  Timeout anterior cancelado');
-    }
-    
-    conversationTimeoutStartTime = Date.now();
-    
-    conversationTimeoutId = setTimeout(() => {
-      const elapsed = Date.now() - conversationTimeoutStartTime;
-      console.log(`🔴 MODO PASIVO: Conversación terminada por inactividad (${elapsed}ms transcurridos)`);
-      isAgentActive = false;
-      conversationTimeoutId = null;
-    }, CONVERSATION_TIMEOUT);
-    
-    console.log(`   ⏰ Nuevo timeout de conversación: ${CONVERSATION_TIMEOUT/1000}s`);
-  }
-
-  function cancelConversationTimeout() {
-    if (conversationTimeoutId) {
-      const elapsed = Date.now() - conversationTimeoutStartTime;
-      clearTimeout(conversationTimeoutId);
-      conversationTimeoutId = null;
-      console.log(`⏸️  Timeout CANCELADO (había transcurrido ${elapsed}ms de ${CONVERSATION_TIMEOUT}ms)`);
-    }
-  }
-
-  function canAgentRespond() {
-    const now = Date.now();
-    const timeSinceLastResponse = now - lastAgentResponseTime;
-    
-    if (isAgentSpeaking) {
-      console.log('⏸️  El agente está hablando actualmente');
-      return false;
-    }
-    
-    if (isProcessing) {
-      console.log('⏸️  Ya se está procesando una respuesta');
-      return false;
-    }
-    
-    if (timeSinceLastResponse < AUDIO_COOLDOWN) {
-      const remainingTime = Math.ceil((AUDIO_COOLDOWN - timeSinceLastResponse) / 1000);
-      console.log(`⏸️  Cooldown activo: esperando ${remainingTime}s más`);
-      return false;
-    }
-    
-    return true;
-  }
-
-  async function shouldAgentRespond(text, speakerName) {
-    if (isAgentActive) {
-      console.log('💬 MODO ACTIVO: Agente responde (está en conversación)');
-      return true;
-    }
-    
-    console.log('👂 MODO PASIVO: La IA decidirá si debe responder...');
-    
-    // Usar IA para decidir si debe responder
-    const shouldRespond = await aiDecideShouldRespond(text, speakerName);
-    
-    if (shouldRespond) {
-      console.log('🔔 IA decidió que debe responder');
-      console.log('🎯 Activando conversación...');
-      activateConversation();
-      return true;
-    }
-    
-    console.log('⏭️  IA decidió no responder');
-    return false;
-  }
-
-  async function aiDecideShouldRespond(text, speakerName) {
-    try {
-      console.log('🤖 Consultando a la IA si debe responder...');
-      
-      // Contexto reciente de la conversación
-      const recentContext = conversationHistory.slice(-6).map(msg => {
-        return `${msg.role === 'user' ? '[Usuario]' : '[' + agent.display_name + ']'}: ${msg.content}`;
-      }).join('\n');
-
-      const prompt = `Sos ${agent.display_name}, un agente de IA en una reunión. 
-
-TU PERFIL:
-${AGENT_PROFILE.substring(0, 500)}
-
-CONTEXTO RECIENTE DE LA CONVERSACIÓN:
-${recentContext || 'No hay contexto previo'}
-
-NUEVA INTERVENCIÓN:
-${speakerName} dice: "${text}"
-
-PREGUNTA: ¿Debés responder a esto?
-
-Respondé "SI" si:
-- Te están hablando directamente (mencionan tu nombre)
-- Te hicieron una pregunta (directa o indirecta)
-- Hay algo que debas aclarar o agregar según tu rol
-- Dijiste algo y están respondiendo a eso
-- Hay una pausa que espera tu respuesta
-- Es tu turno natural en la conversación
-
-Respondé "NO" si:
-- Están hablando entre ellos sin dirigirse a vos
-- Es un comentario que no requiere tu input
-- Ya respondiste y están procesando
-- No sos necesario en este momento
-
-Responde SOLO con un JSON:
-{
-  "should_respond": true/false,
-  "reason": "explicación breve de por qué sí o no"
-}`;
-
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            {
-              role: 'system',
-              content: 'Eres un asistente que decide si un agente de IA debe responder. Respondes SOLO en JSON válido.'
-            },
-            {
-              role: 'user',
-              content: prompt
-            }
-          ],
-          temperature: 0.3,
-          max_tokens: 150,
-          response_format: { type: "json_object" }
-        })
-      });
-
-      if (!response.ok) {
-        console.error('❌ Error en IA decision, usando fallback');
-        return detectAgentMentionOrQuestion(text); // Fallback a triggers
-      }
-
-      const data = await response.json();
-      const decision = JSON.parse(data.choices[0].message.content);
-      
-      console.log(`🤖 Decisión de IA: ${decision.should_respond ? 'RESPONDER' : 'NO RESPONDER'}`);
-      console.log(`   Razón: ${decision.reason}`);
-
-      return decision.should_respond;
-
-    } catch (error) {
-      console.error('❌ Error en aiDecideShouldRespond:', error.message);
-      // Fallback a detección de triggers si falla la IA
-      return detectAgentMentionOrQuestion(text);
-    }
-  }
-
-  function detectAgentMentionOrQuestion(text) {
-    function normalizeText(str) {
-      return str
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '');
-    }
-
-    const normalizedText = normalizeText(text);
-    
-    const agentNameVariations = [
-      normalizeText(agent.name),
-      normalizeText(agent.display_name)
-    ];
-    
-    const mentionedByName = agentNameVariations.some(name => 
-      normalizedText.includes(name)
-    );
-    
-    if (mentionedByName) {
-      console.log(`   → Mención de "${agent.name}"`);
-      return true;
-    }
-    
-    let questionPhrases = [];
-    
-    if (agent.language.startsWith('es')) {
-      questionPhrases = [
-        'me gustaria saber', 'me gustaria que', 'quisiera saber',
-        'podrias decirme', 'podrias explicarme', 'podrias contarme',
-        'puedes decirme', 'puedes explicarme', 'puedes contarme',
-        'necesito saber', 'quiero saber', 'quiero que me',
-        'tengo una pregunta', 'una pregunta', 'consulta',
-        'ayudame con', 'ayudame a', 'necesito ayuda'
-      ];
-    } else if (agent.language.startsWith('en')) {
-      questionPhrases = [
-        'i would like to know', 'could you tell me', 'could you explain',
-        'can you tell me', 'can you explain', 'i want to know',
-        'i need to know', 'i have a question', 'help me with'
-      ];
-    }
-    
-    const hasQuestionPhrase = questionPhrases.some(phrase => 
-      normalizedText.includes(phrase)
-    );
-    
-    if (hasQuestionPhrase) {
-      console.log('   → Frase de pregunta indirecta detectada');
-      return true;
-    }
-    
-    if (agent.language.startsWith('es')) {
-      const siConditionalPattern = /\b(si|s)\s+\w+\s+(puede|pueden|es|son|esta|hay|tiene|funciona)/;
-      if (siConditionalPattern.test(normalizedText)) {
-        console.log('   → Pregunta condicional con "si" detectada');
-        return true;
-      }
-    }
-    
-    let questionWords = [];
-    
-    if (agent.language.startsWith('es')) {
-      questionWords = [
-        'qué', 'que', 'quién', 'quien', 'cómo', 'como', 
-        'cuándo', 'cuando', 'dónde', 'donde', 'por qué', 
-        'porque', 'cuál', 'cual', 'cuáles', 'cuales'
-      ];
-    } else if (agent.language.startsWith('en')) {
-      questionWords = [
-        'what', 'who', 'how', 'when', 'where', 'why', 'which', 'if'
-      ];
-    }
-    
-    const normalizedQuestionWords = questionWords.map(w => normalizeText(w));
-    
-    const hasQuestionWord = normalizedQuestionWords.some(word => {
-      const regex = new RegExp(`(^|\\s)${word}(\\s|$)`, 'i');
-      return regex.test(normalizedText);
-    });
-    
-    const hasQuestionMark = text.includes('?');
-    
-    if (hasQuestionWord || hasQuestionMark) {
-      console.log('   → Pregunta detectada (palabra interrogativa o ?)');
-      return true;
-    }
-    
-    return false;
-  }
-
-  function isEndOfSentence(text) {
-    const trimmed = text.trim();
-    
-    const endsWithPunctuation = /[.!?]$/.test(trimmed);
-    
-    let conversationalEndings = [];
-    
-    if (agent.language.startsWith('es')) {
-      conversationalEndings = [
-        /\bdale$/i, /\bbueno$/i, /\bok$/i, /\bjoya$/i,
-        /\bperfecto$/i, /\bbárbaro$/i, /\bgenial$/i,
-        /\bclaro$/i, /\bexacto$/i, /\bsí$/i, /\bno$/i,
-        /\bgracias$/i, /\bchau$/i, /\bhola$/i
-      ];
-    } else if (agent.language.startsWith('en')) {
-      conversationalEndings = [
-        /\bokay$/i, /\bok$/i, /\balright$/i, /\bgreat$/i,
-        /\bperfect$/i, /\bsure$/i, /\byes$/i, /\bno$/i,
-        /\bthanks$/i, /\bbye$/i, /\bhello$/i, /\bhi$/i
-      ];
-    }
-    
-    const hasConversationalEnding = conversationalEndings.some(pattern => 
-      pattern.test(trimmed)
-    );
-    
-    const hasCompleteThought = trimmed.split(' ').length >= 3;
-    
-    const isShortValidResponse = trimmed.split(' ').length <= 5 && (
-      endsWithPunctuation || hasConversationalEnding
-    );
-    
-    const isComplete = endsWithPunctuation || 
-                      hasConversationalEnding || 
-                      (hasCompleteThought && trimmed.length > 15) ||
-                      isShortValidResponse;
-    
-    return isComplete;
-  }
-
-  async function sendToAgent(text, speakerName) {
-    if (!canAgentRespond()) {
-      return;
-    }
-
-    try {
-      isProcessing = true;
-      isAgentSpeaking = true;
-      
-      console.log(`\n📤 Procesando mensaje para ${agent.name}`);
-      console.log(`   👤 De: ${speakerName}`);
-      console.log(`   💬 Mensaje: ${text}`);
-      console.log(`   🎬 Primer mensaje: ${isFirstMessage ? 'SÍ' : 'NO'}`);
-      const totalStartTime = Date.now();
-
-      const responseText = await getGPT4Response(text, speakerName);
-      const audioBase64 = await generateElevenLabsAudio(responseText, isFirstMessage);
-      await sendAudioToBot(audioBase64);
-
-      // 🧠 NOTIFICAR AL AGENTE PENSANTE
-      await thinkingAgent.processUtterance(responseText, {
-        speakerName: agent.display_name,
-        speakerId: 'agent',
-        isAgentSpeaking: true
-      });
-
-      if (isFirstMessage) {
-        isFirstMessage = false;
-        console.log('✅ Primer mensaje procesado - Próximos mensajes sin silencio inicial');
-      }
-
-      lastAgentResponseTime = Date.now();
-
-      const totalDuration = Date.now() - totalStartTime;
-      console.log(`✅ Proceso completo en ${totalDuration}ms (${(totalDuration/1000).toFixed(2)}s)`);
-      console.log(`⏰ Cooldown activado por ${AUDIO_COOLDOWN/1000}s`);
-
-    } catch (error) {
-      console.error('❌ Error en sendToAgent:', error.message);
-    } finally {
-      isProcessing = false;
-      
-      setTimeout(() => {
-        isAgentSpeaking = false;
-        console.log(`✅ ${agent.name} terminó de hablar - Sistema listo`);
-      }, 2000);
-    }
-  }
-
-  async function processCompleteUtterance() {
-    if (isProcessing) {
-      console.log('⏭️  Ya hay un procesamiento en curso, ignorando utterance completo');
-      return;
-    }
-
-    if (currentUtterance.length === 0) return;
-
-    try {
-      const fullText = currentUtterance.map(word => word.text).join(' ');
-      const speaker = currentUtterance[0].speaker;
-      const speakerName = currentUtterance[0].speakerName;
-      const startTime = currentUtterance[0].start_time;
-      const endTime = currentUtterance[currentUtterance.length - 1].end_time;
-      const wordCount = currentUtterance.length;
-
-      console.log('\n💾 PROCESANDO TRANSCRIPT COMPLETO:');
-      console.log(`   👤 Speaker: ${speakerName} (${speaker})`);
-      console.log(`   📝 Texto: "${fullText}"`);
-      console.log(`   ⏱️  Duración: ${startTime}s - ${endTime}s`);
-      console.log(`   📊 Palabras: ${wordCount}`);
-      console.log(`   👥 Total speakers: ${uniqueSpeakers.size}`);
-      console.log(`   🎯 Estado: ${isAgentActive ? 'ACTIVO' : 'PASIVO'}`);
-      
-      const isComplete = isEndOfSentence(fullText);
-      console.log(`   ✅ Frase completa: ${isComplete ? 'Sí' : 'No'}`);
-
-      const hasMinimumWords = wordCount >= 2;
-      const shouldProcess = isComplete || hasMinimumWords;
-
-      if (!shouldProcess) {
-        console.log('⏭️  Esperando más contenido (muy corto)');
+      // 4. Verificar cancelación por interrupción (Barge-in)
+      if (shouldCancelResponse) {
+        console.log('🛑 Procesamiento cancelado: Usuario interrumpió.');
         return;
       }
 
-      userIsCurrentlySpeaking = false;
-
-      // 🧠 ENVIAR AL AGENTE PENSANTE
-      await thinkingAgent.processUtterance(fullText, {
-        speakerName,
-        speakerId: speaker,
-        isAgentSpeaking: false
-      });
-
-      if (await shouldAgentRespond(fullText, speakerName)) {
-        console.log('🎯 ¡Respuesta activada! Procesando...');
-        await sendToAgent(fullText, speakerName);
-      } else {
-        console.log('⏭️  No se debe responder');
+      // 5. Evaluar decisión del modelo
+      if (aiResponse.includes('[SILENCE]')) {
+        console.log('🤫 El bot decidió callar.');
+        // Guardamos en historial que escuchamos, pero no respondimos
+        conversationHistory.push({ role: 'user', content: userText, speaker: speakerName });
+        return;
       }
 
-      currentUtterance = [];
+      console.log(`🗣️ Bot va a decir: "${aiResponse}"`);
+
+      // 6. Generar Audio (TTS)
+      const audioBase64 = await generateElevenLabsAudio(aiResponse);
+      
+      if (audioBase64 && !shouldCancelResponse) {
+        isAgentSpeaking = true;
+        await sendAudioToRecall(audioBase64);
+        
+        // Actualizar historial
+        conversationHistory.push({ role: 'user', content: userText, speaker: speakerName });
+        conversationHistory.push({ role: 'assistant', content: aiResponse });
+        
+        // Limitar historial
+        if (conversationHistory.length > MAX_CONTEXT_HISTORY) {
+          conversationHistory = conversationHistory.slice(-MAX_CONTEXT_HISTORY);
+        }
+
+        // Notificar al agente pensante que hablamos
+        thinkingAgent.processUtterance(aiResponse, {
+          speakerName: agent.display_name,
+          speakerId: 'agent',
+          isAgentSpeaking: true
+        });
+
+        // Timer para "soltar" el flag de speaking (estimado)
+        setTimeout(() => { isAgentSpeaking = false; }, (aiResponse.length * 80)); 
+      }
 
     } catch (error) {
-      console.error('❌ Error en processCompleteUtterance:', error.message);
+      console.error('❌ Error procesando respuesta:', error);
+    } finally {
+      isProcessingResponse = false;
     }
   }
+
+  // --- MANEJO DE WEBSOCKET ---
 
   ws.on('message', async function incoming(message) {
     try {
       const data = JSON.parse(message);
-      
+
+      // Capturar Bot ID
+      if (!botId && data.data?.bot?.id) {
+        botId = data.data.bot.id;
+        console.log(`🤖 Bot ID vinculado: ${botId}`);
+      }
+
+      // A. DATOS PARCIALES (Usuario está hablando ahora mismo)
+      if (data.event === 'transcript.partial_data') {
+        const words = data.data?.data?.words;
+        if (words && words.length > 0) {
+          lastWordTime = Date.now();
+          
+          // LÓGICA DE INTERRUPCIÓN (BARGE-IN)
+          if (isAgentSpeaking || isProcessingResponse) {
+            console.log('❗ Interrupción detectada!');
+            shouldCancelResponse = true; // Cancela proceso LLM/TTS
+            isAgentSpeaking = false;
+            // Opcional: Enviar señal de stop a Recall si soportan endpoint de "Clear Buffer"
+          }
+          
+          // Reiniciar timer de silencio (Keep-alive del turno del usuario)
+          if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
+          
+          // Re-crear el timer
+          silenceTimeoutId = setTimeout(processAccumulatedAudio, SILENCE_TIMEOUT);
+        }
+      }
+
+      // B. DATOS CONFIRMADOS (Bloque de texto finalizado)
       if (data.event === 'transcript.data') {
         const words = data.data?.data?.words;
         const participant = data.data?.data?.participant;
         
-        if (!botId && data.data?.bot?.id) {
-          botId = data.data.bot.id;
-          console.log(`🤖 Bot ID capturado: ${botId}`);
-        }
-
-        if (words && words.length > 0 && participant) {
+        if (words && words.length > 0) {
           lastWordTime = Date.now();
-          
-          if (!userIsCurrentlySpeaking) {
-            userIsCurrentlySpeaking = true;
-            console.log('🗣️  Usuario comenzó a hablar');
-          }
-          
-          if (isAgentActive && conversationTimeoutId && !userIsCurrentlySpeaking) {
-            cancelConversationTimeout();
-          }
-          
-          console.log(`\n📥 Recibido transcript.data con ${words.length} palabras`);
+          if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
 
-          const speakerId = participant.id;
-          const speakerName = participant.name || `Speaker ${speakerId}`;
+          const speakerName = participant?.name || 'Usuario';
           
-          uniqueSpeakers.add(speakerId);
-
-          if (lastSpeaker !== null && lastSpeaker !== speakerId) {
-            console.log(`🔄 Cambio de speaker detectado: ${lastSpeaker} → ${speakerId}`);
-            
-            if (isProcessing) {
-              console.log('⏭️  Ya hay un procesamiento en curso, ignorando cambio de speaker');
-            } else {
-              await processCompleteUtterance();
-            }
-          }
-
-          words.forEach(word => {
-            const text = word.text || '';
-            if (text.trim()) {
-              currentUtterance.push({
-                text: text,
-                speaker: speakerId,
-                speakerName: speakerName,
-                start_time: word.start_timestamp?.relative || 0,
-                end_time: word.end_timestamp?.relative || 0
-              });
-            }
+          // Acumular palabras en el buffer actual
+          words.forEach(w => {
+            currentUtterance.push({ 
+              text: w.text, 
+              speakerName: speakerName 
+            });
           });
 
-          lastSpeaker = speakerId;
-
-          if (silenceTimeoutId) {
-            clearTimeout(silenceTimeoutId);
-          }
-
-          silenceTimeoutId = setTimeout(async () => {
-            if (isProcessing) {
-              console.log('⏭️  Procesamiento en curso, posponer timeout de silencio');
-              if (silenceTimeoutId) {
-                clearTimeout(silenceTimeoutId);
-              }
-              silenceTimeoutId = setTimeout(async () => {
-                const timeSinceLastWord = Date.now() - lastWordTime;
-                console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
-                await processCompleteUtterance();
-              }, SILENCE_TIMEOUT);
-              return;
-            }
-            
-            const timeSinceLastWord = Date.now() - lastWordTime;
-            console.log(`⏱️  Silencio detectado (${timeSinceLastWord}ms desde última palabra)`);
-            await processCompleteUtterance();
-          }, SILENCE_TIMEOUT);
-
-          console.log(`   Total acumulado: ${currentUtterance.length} palabras`);
+          // Reiniciar timer para procesar el bloque completo
+          silenceTimeoutId = setTimeout(processAccumulatedAudio, SILENCE_TIMEOUT);
         }
-      } else if (data.event === 'transcript.partial_data') {
-        console.log('   ⏭️  Ignorando partial_data');
       }
-      
+
     } catch (e) {
-      console.error('❌ Error procesando mensaje:', e.message);
+      console.error('Error WS parsing:', e);
     }
   });
 
-  ws.on('close', async function close(code, reason) {
-    console.log(`\n❌ Conexión cerrada desde: ${clientIp}`);
-    console.log(`   Código: ${code}, Razón: ${reason || 'No especificada'}`);
+  // Función que se ejecuta cuando hay SILENCIO tras hablar
+  async function processAccumulatedAudio() {
+    if (currentUtterance.length === 0) return;
+
+    // Reconstruir frase
+    const fullText = currentUtterance.map(w => w.text).join(' ').trim();
+    const speakerName = currentUtterance[0].speakerName;
     
-    // 🧠 OBTENER PENSAMIENTOS FINALES
+    // Limpiar buffer para la próxima
+    currentUtterance = [];
+
+    // Validaciones básicas
+    if (fullText.length < 3) return; // Ignorar ruidos muy cortos
+    
+    console.log(`\n📝 Transcript Final (${speakerName}): "${fullText}"`);
+
+    // Enviar al núcleo de IA
+    await processAndRespond(fullText, speakerName);
+  }
+
+  ws.on('close', async () => {
+    console.log('🔌 Conexión cerrada');
+    if (silenceTimeoutId) clearTimeout(silenceTimeoutId);
+    
+    // Generar reporte final del ThinkingAgent
     await thinkingAgent.getFinalThoughts();
-    
-    if (currentUtterance.length > 0) {
-      await processCompleteUtterance();
-    }
-    
-    if (silenceTimeoutId) {
-      clearTimeout(silenceTimeoutId);
-    }
-    
-    if (conversationTimeoutId) {
-      clearTimeout(conversationTimeoutId);
-    }
-  });
-
-  ws.on('error', function error(err) {
-    console.error('❌ Error en WebSocket:', err.message);
-  });
-
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    }
-  }, 30000);
-
-  ws.on('close', () => {
-    clearInterval(pingInterval);
   });
 });
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Error no capturado:', error);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('❌ Promesa rechazada:', reason);
-});
-
-console.log('\n📡 Servidor WebSocket listo - Esperando conexiones...\n');
